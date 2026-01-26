@@ -489,7 +489,7 @@
   resolved "https://registry.yarnpkg.com/@tauri-apps/cli-linux-riscv64-gnu/-/cli-linux-riscv64-gnu-2.9.6.tgz#aa8ec23d62cbb85a75c3e172637e78f485dbfcf8"
   integrity sha512-fmp1hnulbqzl1GkXl4aTX9fV+ubHw2LqlLH1PE3BxZ11EQk+l/TmiEongjnxF0ie4kV8DQfDNJ1KGiIdWe1GvQ==
 
-"@tauri-apps/cli-linux-x64-gnu@2.9.6":
+"@tauri-apps/cli-linux-x64-gnu@2.9.6", "@tauri-apps/cli-linux-x64-gnu@^2.9.6":
   version "2.9.6"
   resolved "https://registry.yarnpkg.com/@tauri-apps/cli-linux-x64-gnu/-/cli-linux-x64-gnu-2.9.6.tgz#036c0463c5eee2298ed6ca8cb2838738816c7290"
   integrity sha512-vY0le8ad2KaV1PJr+jCd8fUF9VOjwwQP/uBuTJvhvKTloEwxYA/kAjKK9OpIslGA9m/zcnSo74czI6bBrm2sYA==

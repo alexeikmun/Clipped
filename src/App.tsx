@@ -34,15 +34,35 @@ function App() {
         // Ignore consecutive duplicates
         if (prev.length > 0 && prev[0] === newItem) return prev;
         
-        // Add new item to top, limit to 50
-        return [newItem, ...prev].slice(0, 50);
+        // Add new item to top, limit to 999
+        return [newItem, ...prev].slice(0, 999);
+      });
+    });
+
+    // Listen for shortcut cycle event
+    const unlistenShortcutPromise = listen("shortcut-cycle-next", () => {
+      console.log("Shortcut cycle event received"); // Debug log
+      setSelectedIndex((prev) => {
+        // If we have history, cycle to the next item
+        if (history.length > 0) {
+           const nextIndex = prev + 1;
+           // Cycle back to 0 if we reach the end
+           if (nextIndex >= history.length) {
+             return 0;
+           }
+           const newIndex = nextIndex;
+           console.log("Cycling from", prev, "to", newIndex); // Debug log
+           return newIndex;
+        }
+        return prev;
       });
     });
 
     return () => {
       unlistenPromise.then((f) => f());
+      unlistenShortcutPromise.then((f) => f());
     };
-  }, []);
+  }, [history]); // Add history dependency to access latest length for shortcut cycle
 
   const filteredItems = useMemo(() => {
     if (!searchQuery) return history;
@@ -81,13 +101,21 @@ function App() {
     }
   }, [selectedIndex]);
 
-  const handleKeyDown = async (e: React.KeyboardEvent) => {
+  const handleKeyDown = async (e: KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSelectedIndex((prev) => Math.min(prev + 1, filteredItems.length - 1));
+      setSelectedIndex((prev) => {
+        const nextIndex = prev + 1;
+        if (nextIndex >= filteredItems.length) return 0; // Cycle to start
+        return nextIndex;
+      });
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setSelectedIndex((prev) => Math.max(prev - 1, 0));
+      setSelectedIndex((prev) => {
+        const nextIndex = prev - 1;
+        if (nextIndex < 0) return filteredItems.length - 1; // Cycle to end
+        return nextIndex;
+      });
     } else if (e.key === "Enter") {
       e.preventDefault();
       const item = filteredItems[selectedIndex];
@@ -109,47 +137,60 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [filteredItems, selectedIndex]); // Re-attach listener when state changes
+
   return (
-    <div className="app" onKeyDown={handleKeyDown}>
-      <div className="search-container">
-        <input
-          ref={inputRef}
-          className="search-input"
-          type="text"
-          placeholder="Type to search..."
-          value={searchQuery}
-          onChange={(e) => {
-             setSearchQuery(e.target.value);
-             setSelectedIndex(0);
-          }}
-          autoFocus
-          spellCheck={false}
-        />
-      </div>
-      <ul className="list-container">
-        {filteredItems.map((item, index) => (
-          <li
-            key={index}
-            className={`list-item ${index === selectedIndex ? "selected" : ""}`}
-            onClick={() => {
-                setSelectedIndex(index);
-                if ("__TAURI_INTERNALS__" in window) {
-                   invoke("paste_item", { text: item });
-                } else {
-                   console.log("Mock paste:", item);
-                }
-                setSearchQuery("");
-            }}
-          >
-            {item}
-          </li>
-        ))}
-        {filteredItems.length === 0 && (
-            <li className="list-item" style={{color: '#666', cursor: 'default'}}>
-                {history.length === 0 ? "No clipboard history" : "No matches"}
-            </li>
-        )}
-      </ul>
+    <div className="app">
+      {filteredItems.length > 0 ? (
+        <div className="card-container">
+          <div className="header-row">
+            <div className="counter-badge">
+               {selectedIndex + 1}
+            </div>
+            <input
+              ref={inputRef}
+              className="search-input-visible"
+              type="text"
+              placeholder="Search..."
+              value={searchQuery}
+              onChange={(e) => {
+                 setSearchQuery(e.target.value);
+                 setSelectedIndex(0);
+              }}
+              spellCheck={false}
+            />
+          </div>
+          <div className="card-content">
+             {filteredItems[selectedIndex]}
+          </div>
+        </div>
+      ) : (
+         <div className="card-container empty">
+             <div className="header-row">
+                <input
+                  ref={inputRef}
+                  className="search-input-visible"
+                  type="text"
+                  placeholder="Search..."
+                  value={searchQuery}
+                  onChange={(e) => {
+                     setSearchQuery(e.target.value);
+                     setSelectedIndex(0);
+                  }}
+                  autoFocus
+                  spellCheck={false}
+                />
+             </div>
+             <div className="card-content">
+                {history.length === 0 ? "No history" : "No matches"}
+             </div>
+         </div>
+      )}
     </div>
   );
 }

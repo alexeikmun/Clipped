@@ -13,14 +13,16 @@
     "windows": [
       {
         "title": "Clipped",
-        "width": 600,
-        "height": 400,
+        "width": 480,
+        "height": 360,
         "decorations": false,
         "center": true,
         "visible": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
-        "resizable": false
+        "resizable": false,
+        "transparent": true,
+        "shadow": false
       }
     ],
     "security": {

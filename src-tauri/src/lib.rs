@@ -9,7 +9,7 @@ use arboard::Clipboard;
 use enigo::{Enigo, Settings, Keyboard, Direction, Key};
 
 const HISTORY_FILE: &str = "clipboard_history.json";
-const MAX_HISTORY: usize = 50;
+const MAX_HISTORY: usize = 999;
 
 struct AppState {
     is_monitoring: AtomicBool,
@@ -86,8 +86,10 @@ pub fn run() {
                         if let Some(window) = app.get_webview_window("main") {
                             let state = app.state::<AppState>();
                             if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                                state.is_monitoring.store(true, Ordering::Relaxed);
+                                // If window is already visible, emit an event to cycle to next item
+                                // instead of hiding the window
+                                println!("Window is visible, emitting shortcut-cycle-next"); // Debug log
+                                let _ = window.emit("shortcut-cycle-next", ());
                             } else {
                                 let _ = window.center();
                                 let _ = window.show();
@@ -99,16 +101,16 @@ pub fn run() {
                 })
                 .build()
         )
-        // .on_window_event(|window, event| {
-        //     if let WindowEvent::Focused(focused) = event {
-        //         // If window loses focus and is visible, hide it
-        //         if !focused && window.is_visible().unwrap_or(false) {
-        //              let _ = window.hide();
-        //              let state = window.state::<AppState>();
-        //              state.is_monitoring.store(true, Ordering::Relaxed);
-        //         }
-        //     }
-        // })
+        .on_window_event(|window, event| {
+            if let WindowEvent::Focused(focused) = event {
+                // If window loses focus and is visible, hide it
+                if !focused && window.is_visible().unwrap_or(false) {
+                     let _ = window.hide();
+                     let state = window.state::<AppState>();
+                     state.is_monitoring.store(true, Ordering::Relaxed);
+                }
+            }
+        })
         .setup(|app| {
             let data_dir = app.path().app_data_dir().expect("failed to get app data dir");
             
