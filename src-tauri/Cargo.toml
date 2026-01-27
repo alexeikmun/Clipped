@@ -26,4 +26,8 @@ tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-global-shortcut = "2.3.1"
 enigo = "0.6.1"
 arboard = "3.6.1"
+tauri-plugin-autostart = "2"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-autostart = "2"
 

@@ -116,7 +116,21 @@ pub fn run() {
                 }
             }
         })
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
         .setup(|app| {
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let autostart_manager = app.autolaunch();
+                if !autostart_manager.is_enabled().unwrap_or(false) {
+                    let _ = autostart_manager.enable();
+                    println!("Autostart enabled for Clipped");
+                }
+            }
+
             let data_dir = app.path().app_data_dir().expect("failed to get app data dir");
             
             // Ensure data dir exists

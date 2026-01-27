@@ -53,6 +53,8 @@ function App() {
         // Add new item to top, limit to 999
         return [newItem, ...prev].slice(0, 999);
       });
+      // Reset selection to top when new item arrives
+      setSelectedIndex(0);
     });
 
     // Listen for shortcut cycle event
