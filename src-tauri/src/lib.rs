@@ -127,7 +127,7 @@ pub fn run() {
                 let autostart_manager = app.autolaunch();
                 if !autostart_manager.is_enabled().unwrap_or(false) {
                     let _ = autostart_manager.enable();
-                    println!("Autostart enabled for Clipped");
+
                 }
             }
 

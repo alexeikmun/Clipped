@@ -49,7 +49,7 @@ function App() {
         const newItem = event.payload;
         // Ignore consecutive duplicates
         if (prev.length > 0 && prev[0] === newItem) return prev;
-        
+
         // Add new item to top, limit to 999
         return [newItem, ...prev].slice(0, 999);
       });
@@ -61,18 +61,18 @@ function App() {
     const unlistenShortcutPromise = listen("shortcut-cycle-next", () => {
       console.log("Shortcut cycle event received"); // Debug log
       const { history } = stateRef.current;
-      
+
       setSelectedIndex((prev) => {
         // If we have history, cycle to the next item
         if (history.length > 0) {
-           const nextIndex = prev + 1;
-           // Cycle back to 0 if we reach the end
-           if (nextIndex >= history.length) {
-             return 0;
-           }
-           const newIndex = nextIndex;
-           console.log("Cycling from", prev, "to", newIndex); // Debug log
-           return newIndex;
+          const nextIndex = prev + 1;
+          // Cycle back to 0 if we reach the end
+          if (nextIndex >= history.length) {
+            return 0;
+          }
+          const newIndex = nextIndex;
+          console.log("Cycling from", prev, "to", newIndex); // Debug log
+          return newIndex;
         }
         return prev;
       });
@@ -98,7 +98,7 @@ function App() {
     };
     window.addEventListener("focus", handleFocus);
     inputRef.current?.focus();
-    
+
     return () => {
       window.removeEventListener("focus", handleFocus);
     };
@@ -116,61 +116,70 @@ function App() {
   }, [selectedIndex]);
 
   // Keyboard navigation
-  useEffect(() => {
-    const handleKeyDown = async (e: KeyboardEvent) => {
-      const { filteredItems, selectedIndex } = stateRef.current;
 
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSelectedIndex((prev) => {
-          const nextIndex = prev + 1;
-          if (nextIndex >= filteredItems.length) return 0; // Cycle to start
-          return nextIndex;
-        });
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSelectedIndex((prev) => {
-          const nextIndex = prev - 1;
-          if (nextIndex < 0) return filteredItems.length - 1; // Cycle to end
-          return nextIndex;
-        });
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        const item = filteredItems[selectedIndex];
-        if (item) {
-          if ("__TAURI_INTERNALS__" in window) {
-             await invoke("paste_item", { text: item });
-          } else {
-             console.log("Mock paste:", item);
-          }
-          setSearchQuery(""); // Clear search on paste
-        }
-      } else if (e.key === "Escape") {
-        console.log("Escape key pressed");
-        e.preventDefault();
-        
-        // Clear search first
-        setSearchQuery("");
-        
+  // Keyboard navigation handler
+  const handleKeyDown = async (e: KeyboardEvent | React.KeyboardEvent) => {
+    const { filteredItems, selectedIndex } = stateRef.current;
+
+    // Use pure key values
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      setSelectedIndex((prev) => {
+        const nextIndex = prev + 1;
+        if (nextIndex >= filteredItems.length) return 0; // Cycle to start
+        return nextIndex;
+      });
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      setSelectedIndex((prev) => {
+        const nextIndex = prev - 1;
+        if (nextIndex < 0) return filteredItems.length - 1; // Cycle to end
+        return nextIndex;
+      });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      const item = filteredItems[selectedIndex];
+      if (item) {
         if ("__TAURI_INTERNALS__" in window) {
-          try {
-            console.log("Invoking hide_app...");
-            await invoke("hide_app");
-            console.log("hide_app invoked successfully");
-          } catch (error) {
-            console.error("Failed to hide app:", error);
-          }
+          await invoke("paste_item", { text: item });
         } else {
-          console.warn("Not in Tauri, cannot hide window");
+          console.log("Mock paste:", item);
         }
+        setSearchQuery(""); // Clear search on paste
       }
-    };
+    } else if (e.key === "Escape") {
+      console.log("Escape key pressed");
+      e.preventDefault();
+      e.stopPropagation();
 
+      // Clear search first
+      setSearchQuery("");
+
+      if ("__TAURI_INTERNALS__" in window) {
+        try {
+          console.log("Invoking hide_app...");
+          await invoke("hide_app");
+          console.log("hide_app invoked successfully");
+        } catch (error) {
+          console.error("Failed to hide app:", error);
+        }
+      } else {
+        console.warn("Not in Tauri, cannot hide window");
+      }
+    }
+  };
+
+  // Attach global listener for when input is not focused
+  useEffect(() => {
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, []); // Empty dependency array - listener attached once
+  }, []); // Run once
+
 
   return (
     <div className="app">
@@ -178,46 +187,48 @@ function App() {
         <div className="card-container">
           <div className="header-row">
             <div className="counter-badge">
-               {selectedIndex + 1}
+              {selectedIndex + 1}
             </div>
             <input
               ref={inputRef}
+              onKeyDown={handleKeyDown}
               className="search-input-visible"
               type="text"
               placeholder="Search..."
               value={searchQuery}
               onChange={(e) => {
-                 setSearchQuery(e.target.value);
-                 setSelectedIndex(0);
+                setSearchQuery(e.target.value);
+                setSelectedIndex(0);
               }}
               spellCheck={false}
             />
           </div>
           <div className="card-content">
-             {filteredItems[selectedIndex]}
+            {filteredItems[selectedIndex]}
           </div>
         </div>
       ) : (
-         <div className="card-container empty">
-             <div className="header-row">
-                <input
-                  ref={inputRef}
-                  className="search-input-visible"
-                  type="text"
-                  placeholder="Search..."
-                  value={searchQuery}
-                  onChange={(e) => {
-                     setSearchQuery(e.target.value);
-                     setSelectedIndex(0);
-                  }}
-                  autoFocus
-                  spellCheck={false}
-                />
-             </div>
-             <div className="card-content">
-                {history.length === 0 ? "No history" : "No matches"}
-             </div>
-         </div>
+        <div className="card-container empty">
+          <div className="header-row">
+            <input
+              ref={inputRef}
+              onKeyDown={handleKeyDown}
+              className="search-input-visible"
+              type="text"
+              placeholder="Search..."
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setSelectedIndex(0);
+              }}
+              autoFocus
+              spellCheck={false}
+            />
+          </div>
+          <div className="card-content">
+            {history.length === 0 ? "No history" : "No matches"}
+          </div>
+        </div>
       )}
     </div>
   );
