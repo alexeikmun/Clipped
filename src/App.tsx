@@ -10,6 +10,18 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Computed state
+  const filteredItems = useMemo(() => {
+    if (!searchQuery) return history;
+    const lowerQuery = searchQuery.toLowerCase();
+    return history.filter((item) => item.toLowerCase().includes(lowerQuery));
+  }, [history, searchQuery]);
+
+  // Keep track of latest state for event listeners
+  const stateRef = useRef({ filteredItems, selectedIndex, history });
+  stateRef.current = { filteredItems, selectedIndex, history };
+
+  // Initialization effect
   useEffect(() => {
     // Check if running in Tauri environment
     const isTauri = "__TAURI_INTERNALS__" in window;
@@ -27,6 +39,11 @@ function App() {
         setHistory(history);
       }
     });
+  }, []); // Run once on mount
+
+  // Event listeners effect
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
 
     const unlistenPromise = listen<string>("clipboard-new", (event) => {
       setHistory((prev) => {
@@ -42,6 +59,8 @@ function App() {
     // Listen for shortcut cycle event
     const unlistenShortcutPromise = listen("shortcut-cycle-next", () => {
       console.log("Shortcut cycle event received"); // Debug log
+      const { history } = stateRef.current;
+      
       setSelectedIndex((prev) => {
         // If we have history, cycle to the next item
         if (history.length > 0) {
@@ -62,13 +81,7 @@ function App() {
       unlistenPromise.then((f) => f());
       unlistenShortcutPromise.then((f) => f());
     };
-  }, [history]); // Add history dependency to access latest length for shortcut cycle
-
-  const filteredItems = useMemo(() => {
-    if (!searchQuery) return history;
-    const lowerQuery = searchQuery.toLowerCase();
-    return history.filter((item) => item.toLowerCase().includes(lowerQuery));
-  }, [history, searchQuery]);
+  }, []); // Run once on mount
 
   // Ensure selection is valid
   useEffect(() => {
@@ -101,48 +114,62 @@ function App() {
     }
   }, [selectedIndex]);
 
-  const handleKeyDown = async (e: KeyboardEvent) => {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setSelectedIndex((prev) => {
-        const nextIndex = prev + 1;
-        if (nextIndex >= filteredItems.length) return 0; // Cycle to start
-        return nextIndex;
-      });
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setSelectedIndex((prev) => {
-        const nextIndex = prev - 1;
-        if (nextIndex < 0) return filteredItems.length - 1; // Cycle to end
-        return nextIndex;
-      });
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const item = filteredItems[selectedIndex];
-      if (item) {
-        if ("__TAURI_INTERNALS__" in window) {
-           await invoke("paste_item", { text: item });
-        } else {
-           console.log("Mock paste:", item);
-        }
-        setSearchQuery(""); // Clear search on paste
-      }
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      if ("__TAURI_INTERNALS__" in window) {
-        await getCurrentWindow().hide();
-        await invoke("set_monitoring", { monitoring: true });
-      }
-      setSearchQuery(""); // Clear search on close
-    }
-  };
-
+  // Keyboard navigation
   useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      const { filteredItems, selectedIndex } = stateRef.current;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIndex((prev) => {
+          const nextIndex = prev + 1;
+          if (nextIndex >= filteredItems.length) return 0; // Cycle to start
+          return nextIndex;
+        });
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIndex((prev) => {
+          const nextIndex = prev - 1;
+          if (nextIndex < 0) return filteredItems.length - 1; // Cycle to end
+          return nextIndex;
+        });
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const item = filteredItems[selectedIndex];
+        if (item) {
+          if ("__TAURI_INTERNALS__" in window) {
+             await invoke("paste_item", { text: item });
+          } else {
+             console.log("Mock paste:", item);
+          }
+          setSearchQuery(""); // Clear search on paste
+        }
+      } else if (e.key === "Escape") {
+        console.log("Escape key pressed");
+        e.preventDefault();
+        
+        // Clear search first
+        setSearchQuery("");
+        
+        if ("__TAURI_INTERNALS__" in window) {
+          try {
+            console.log("Invoking hide_app...");
+            await invoke("hide_app");
+            console.log("hide_app invoked successfully");
+          } catch (error) {
+            console.error("Failed to hide app:", error);
+          }
+        } else {
+          console.warn("Not in Tauri, cannot hide window");
+        }
+      }
+    };
+
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [filteredItems, selectedIndex]); // Re-attach listener when state changes
+  }, []); // Empty dependency array - listener attached once
 
   return (
     <div className="app">

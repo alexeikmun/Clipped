@@ -73,6 +73,14 @@ fn paste_item(app: AppHandle, state: tauri::State<AppState>, text: String) -> Re
     Ok(())
 }
 
+#[tauri::command]
+fn hide_app(app: AppHandle, state: tauri::State<AppState>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    state.is_monitoring.store(true, Ordering::Relaxed);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -86,9 +94,6 @@ pub fn run() {
                         if let Some(window) = app.get_webview_window("main") {
                             let state = app.state::<AppState>();
                             if window.is_visible().unwrap_or(false) {
-                                // If window is already visible, emit an event to cycle to next item
-                                // instead of hiding the window
-                                println!("Window is visible, emitting shortcut-cycle-next"); // Debug log
                                 let _ = window.emit("shortcut-cycle-next", ());
                             } else {
                                 let _ = window.center();
@@ -162,7 +167,7 @@ pub fn run() {
             
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history])
+        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history, hide_app])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
