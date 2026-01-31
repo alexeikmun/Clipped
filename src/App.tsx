@@ -1,24 +1,100 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import Fuse from "fuse.js";
 import "./App.css";
+
+interface SearchResult {
+  item: string;
+  matches?: readonly [number, number][];
+}
+
+const HighlightedText = ({ text, matches, query }: { text: string; matches?: readonly [number, number][]; query: string }) => {
+  if (!matches || matches.length === 0) {
+    return <span>{text}</span>;
+  }
+
+  // Merge overlapping or adjacent matches
+  const sortedMatches = [...matches].sort((a, b) => a[0] - b[0]);
+  const mergedMatches: [number, number][] = [];
+
+  if (sortedMatches.length > 0) {
+    let currentMatch = sortedMatches[0];
+    
+    for (let i = 1; i < sortedMatches.length; i++) {
+      const nextMatch = sortedMatches[i];
+      // Check for overlap or adjacency (start <= end + 1)
+      if (nextMatch[0] <= currentMatch[1] + 1) {
+        // Merge
+        currentMatch = [currentMatch[0], Math.max(currentMatch[1], nextMatch[1])];
+      } else {
+        mergedMatches.push(currentMatch);
+        currentMatch = nextMatch;
+      }
+    }
+    mergedMatches.push(currentMatch);
+  }
+
+  const result = [];
+  let lastIndex = 0;
+
+  mergedMatches.forEach((match, i) => {
+    const [start, end] = match;
+    // Add text before match
+    if (start > lastIndex) {
+      result.push(<span key={`text-${i}`}>{text.substring(lastIndex, start)}</span>);
+    }
+    // Check if it's an exact match (length based) - strictly this logic might be fuzzy now but keeps basic style
+    const isExact = (end - start + 1) === query.length;
+    // Add highlighted match
+    result.push(
+      <span key={`match-${i}`} className={isExact ? "highlight exact" : "highlight"}>
+        {text.substring(start, end + 1)}
+      </span>
+    );
+    lastIndex = end + 1;
+  });
+
+  // Add remaining text
+  if (lastIndex < text.length) {
+    result.push(<span key="text-end">{text.substring(lastIndex)}</span>);
+  }
+
+  return <>{result}</>;
+};
 
 function App() {
   const [history, setHistory] = useState<string[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
+  const [isSearchVisible, setIsSearchVisible] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Computed state
-  const filteredItems = useMemo(() => {
-    if (!searchQuery) return history;
-    const lowerQuery = searchQuery.toLowerCase();
-    return history.filter((item) => item.toLowerCase().includes(lowerQuery));
+  const filteredItems = useMemo<SearchResult[]>(() => {
+    if (!searchQuery) {
+      return history.map(item => ({ item }));
+    }
+
+    const fuse = new Fuse(history, {
+      includeScore: true,
+      includeMatches: true,
+      threshold: 0.4,
+      ignoreLocation: true,
+      useExtendedSearch: true,
+      minMatchCharLength: 2,
+    });
+
+    const results = fuse.search(searchQuery);
+    return results.map(result => ({
+      item: result.item,
+      matches: result.matches?.[0]?.indices as readonly [number, number][] | undefined
+    }));
   }, [history, searchQuery]);
 
   // Keep track of latest state for event listeners
-  const stateRef = useRef({ filteredItems, selectedIndex, history });
-  stateRef.current = { filteredItems, selectedIndex, history };
+  const stateRef = useRef({ filteredItems, selectedIndex, history, isSearchVisible, searchQuery });
+  stateRef.current = { filteredItems, selectedIndex, history, isSearchVisible, searchQuery };
 
   // Initialization effect
   useEffect(() => {
@@ -119,7 +195,7 @@ function App() {
 
   // Keyboard navigation handler
   const handleKeyDown = async (e: KeyboardEvent | React.KeyboardEvent) => {
-    const { filteredItems, selectedIndex } = stateRef.current;
+    const { filteredItems, selectedIndex, isSearchVisible } = stateRef.current;
 
     // Use pure key values
     if (e.key === "ArrowDown") {
@@ -141,7 +217,7 @@ function App() {
     } else if (e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
-      const item = filteredItems[selectedIndex];
+      const item = filteredItems[selectedIndex]?.item;
       if (item) {
         if ("__TAURI_INTERNALS__" in window) {
           await invoke("paste_item", { text: item });
@@ -158,6 +234,11 @@ function App() {
       // Clear search first
       setSearchQuery("");
 
+      if (isSearchVisible) {
+        setIsSearchVisible(false);
+        return;
+      }
+
       if ("__TAURI_INTERNALS__" in window) {
         try {
           console.log("Invoking hide_app...");
@@ -169,6 +250,9 @@ function App() {
       } else {
         console.warn("Not in Tauri, cannot hide window");
       }
+    } else if (e.key === "f" && !isSearchVisible) {
+      e.preventDefault();
+      setIsSearchVisible(true);
     }
   };
 
@@ -183,12 +267,41 @@ function App() {
 
   return (
     <div className="app">
-      {filteredItems.length > 0 ? (
-        <div className="card-container">
-          <div className="header-row">
-            <div className="counter-badge">
-              {selectedIndex + 1}
-            </div>
+      <div className="card-container">
+        <div className="header-row">
+          <div className="counter-badge">
+            {filteredItems.length > 0 ? selectedIndex + 1 : 0}
+          </div>
+          
+          <div 
+            onClick={() => {
+              if (isSearchVisible) {
+                // Optional: Toggle off or just focus? 
+                // Let's toggle off to act as a close button if needed, 
+                // but user asked to "display searchbar". 
+                // If it's already visible, maybe just focus it.
+                // But typically icons toggle. Let's try toggle.
+                setIsSearchVisible(false);
+                setSearchQuery("");
+              } else {
+                setIsSearchVisible(true);
+              }
+            }}
+            style={{ 
+              marginLeft: '10px', 
+              cursor: 'pointer', 
+              display: 'flex', 
+              alignItems: 'center',
+              opacity: isSearchVisible ? 0.7 : 1 // Dim slightly if active
+            }}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: '#ccc' }}>
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+          </div>
+
+          {isSearchVisible && (
             <input
               ref={inputRef}
               onKeyDown={handleKeyDown}
@@ -201,35 +314,35 @@ function App() {
                 setSelectedIndex(0);
               }}
               spellCheck={false}
-            />
-          </div>
-          <div className="card-content">
-            {filteredItems[selectedIndex]}
-          </div>
-        </div>
-      ) : (
-        <div className="card-container empty">
-          <div className="header-row">
-            <input
-              ref={inputRef}
-              onKeyDown={handleKeyDown}
-              className="search-input-visible"
-              type="text"
-              placeholder="Search..."
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setSelectedIndex(0);
-              }}
               autoFocus
-              spellCheck={false}
             />
-          </div>
-          <div className="card-content">
-            {history.length === 0 ? "No history" : "No matches"}
-          </div>
+          )}
         </div>
-      )}
+
+        <div className="card-content">
+          {filteredItems.length > 0 ? (
+            searchQuery ? (
+              filteredItems.map((result, index) => (
+                <div 
+                  key={index}
+                  className={`list-item ${index === selectedIndex ? 'selected' : ''}`}
+                  onClick={() => setSelectedIndex(index)}
+                >
+                  <HighlightedText text={result.item} matches={result.matches} query={searchQuery} />
+                </div>
+              ))
+            ) : (
+              <div className="list-item selected" style={{ cursor: 'default' }}>
+                {filteredItems[selectedIndex]?.item}
+              </div>
+            )
+          ) : (
+            <div style={{ padding: '20px', textAlign: 'center', color: '#888' }}>
+              {history.length === 0 ? "Clipboard is empty" : "No matches found"}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

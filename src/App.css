@@ -98,19 +98,35 @@ body {
   box-sizing: border-box;
   overflow-y: auto;
   overflow-x: hidden;
-  word-break: break-word;
-  white-space: pre-wrap;
-  font-family: 'Consolas', 'Monaco', monospace;
-  font-size: 1.1em;
-  color: #eee;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  text-align: center;
 }
 
-.card-container.empty .card-content {
-  color: #888;
-  font-style: italic;
+.list-item {
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 4px;
+  transition: background-color 0.2s;
+  white-space: pre-wrap;
+  word-break: break-all;
+  text-align: left;
+}
+
+.list-item:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.list-item.selected {
+  background-color: rgba(255, 255, 255, 0.15);
+  border-left: 3px solid #646cff;
+}
+
+.highlight {
+  background-color: rgba(255, 255, 0, 0.3);
+  color: #fff;
+  font-weight: bold;
+  border-radius: 2px;
+}
+
+.highlight.exact {
+  background-color: rgba(0, 255, 0, 0.3);
 }
