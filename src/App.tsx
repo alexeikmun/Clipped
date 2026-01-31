@@ -75,6 +75,11 @@ function App() {
 
   // Initialization effect
   useEffect(() => {
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener("contextmenu", handleContextMenu);
+
     // Check if running in Tauri environment
     const isTauri = "__TAURI_INTERNALS__" in window;
 
@@ -95,6 +100,9 @@ function App() {
         setHistory(history);
       }
     });
+    return () => {
+      window.removeEventListener("contextmenu", handleContextMenu);
+    };
   }, []); // Run once on mount
 
   // Event listeners effect
