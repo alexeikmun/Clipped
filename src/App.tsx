@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Fuse from "fuse.js";
 import "./App.css";
+import { ContentPreview } from "./components/ContentPreview";
 
 interface ClipItem {
   id: string;
@@ -13,29 +14,6 @@ interface ClipItem {
 interface SearchResult {
   item: ClipItem;
 }
-
-const escapeRegExp = (string: string) => {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-};
-
-const HighlightedText = ({ text, query }: { text: string; query: string }) => {
-  if (!query) {
-    return <span>{text}</span>;
-  }
-
-  const parts = text.split(new RegExp(`(${escapeRegExp(query)})`, 'gi'));
-  return (
-    <>
-      {parts.map((part, i) => 
-        part.toLowerCase() === query.toLowerCase() ? (
-          <span key={i} className="highlight exact">{part}</span>
-        ) : (
-          <span key={i}>{part}</span>
-        )
-      )}
-    </>
-  );
-};
 
 const StarIcon = ({ filled, onClick, className }: { filled: boolean; onClick?: (e: React.MouseEvent) => void; className?: string }) => (
   <div className={className} onClick={onClick}>
@@ -221,7 +199,7 @@ function App() {
 
   // Keyboard navigation handler
   const handleKeyDown = async (e: KeyboardEvent | React.KeyboardEvent) => {
-    const { filteredItems, selectedIndex, isSearchVisible, showFavorites } = stateRef.current;
+    const { filteredItems, selectedIndex, isSearchVisible } = stateRef.current;
 
     // Use pure key values
     if (e.key === "Tab") {
@@ -323,7 +301,7 @@ function App() {
       )}
 
       <div className="item-text">
-        <HighlightedText text={item.text} query={searchQuery} />
+        <ContentPreview text={item.text} query={searchQuery} />
       </div>
 
       {/* Right Star (only if NOT favorited) */}
