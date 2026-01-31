@@ -6,61 +6,29 @@ import "./App.css";
 
 interface SearchResult {
   item: string;
-  matches?: readonly [number, number][];
 }
 
-const HighlightedText = ({ text, matches, query }: { text: string; matches?: readonly [number, number][]; query: string }) => {
-  if (!matches || matches.length === 0) {
+const escapeRegExp = (string: string) => {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+const HighlightedText = ({ text, query }: { text: string; query: string }) => {
+  if (!query) {
     return <span>{text}</span>;
   }
 
-  // Merge overlapping or adjacent matches
-  const sortedMatches = [...matches].sort((a, b) => a[0] - b[0]);
-  const mergedMatches: [number, number][] = [];
-
-  if (sortedMatches.length > 0) {
-    let currentMatch = sortedMatches[0];
-    
-    for (let i = 1; i < sortedMatches.length; i++) {
-      const nextMatch = sortedMatches[i];
-      // Check for overlap or adjacency (start <= end + 1)
-      if (nextMatch[0] <= currentMatch[1] + 1) {
-        // Merge
-        currentMatch = [currentMatch[0], Math.max(currentMatch[1], nextMatch[1])];
-      } else {
-        mergedMatches.push(currentMatch);
-        currentMatch = nextMatch;
-      }
-    }
-    mergedMatches.push(currentMatch);
-  }
-
-  const result = [];
-  let lastIndex = 0;
-
-  mergedMatches.forEach((match, i) => {
-    const [start, end] = match;
-    // Add text before match
-    if (start > lastIndex) {
-      result.push(<span key={`text-${i}`}>{text.substring(lastIndex, start)}</span>);
-    }
-    // Check if it's an exact match (length based) - strictly this logic might be fuzzy now but keeps basic style
-    const isExact = (end - start + 1) === query.length;
-    // Add highlighted match
-    result.push(
-      <span key={`match-${i}`} className={isExact ? "highlight exact" : "highlight"}>
-        {text.substring(start, end + 1)}
-      </span>
-    );
-    lastIndex = end + 1;
-  });
-
-  // Add remaining text
-  if (lastIndex < text.length) {
-    result.push(<span key="text-end">{text.substring(lastIndex)}</span>);
-  }
-
-  return <>{result}</>;
+  const parts = text.split(new RegExp(`(${escapeRegExp(query)})`, 'gi'));
+  return (
+    <>
+      {parts.map((part, i) => 
+        part.toLowerCase() === query.toLowerCase() ? (
+          <span key={i} className="highlight exact">{part}</span>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
+  );
 };
 
 function App() {
@@ -78,7 +46,7 @@ function App() {
 
     const fuse = new Fuse(history, {
       includeScore: true,
-      includeMatches: true,
+      includeMatches: false,
       threshold: 0.4,
       ignoreLocation: true,
       useExtendedSearch: true,
@@ -87,8 +55,7 @@ function App() {
 
     const results = fuse.search(searchQuery);
     return results.map(result => ({
-      item: result.item,
-      matches: result.matches?.[0]?.indices as readonly [number, number][] | undefined
+      item: result.item
     }));
   }, [history, searchQuery]);
 
@@ -250,9 +217,18 @@ function App() {
       } else {
         console.warn("Not in Tauri, cannot hide window");
       }
-    } else if (e.key === "f" && !isSearchVisible) {
+    } else if (
+      (!isSearchVisible || document.activeElement !== inputRef.current) &&
+      e.key.length === 1 &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey
+    ) {
       e.preventDefault();
       setIsSearchVisible(true);
+      setSearchQuery(e.key);
+      setSelectedIndex(0);
+      inputRef.current?.focus();
     }
   };
 
@@ -328,7 +304,7 @@ function App() {
                   className={`list-item ${index === selectedIndex ? 'selected' : ''}`}
                   onClick={() => setSelectedIndex(index)}
                 >
-                  <HighlightedText text={result.item} matches={result.matches} query={searchQuery} />
+                  <HighlightedText text={result.item} query={searchQuery} />
                 </div>
               ))
             ) : (
