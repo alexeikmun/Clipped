@@ -221,10 +221,14 @@ function App() {
 
   // Keyboard navigation handler
   const handleKeyDown = async (e: KeyboardEvent | React.KeyboardEvent) => {
-    const { filteredItems, selectedIndex, isSearchVisible } = stateRef.current;
+    const { filteredItems, selectedIndex, isSearchVisible, showFavorites } = stateRef.current;
 
     // Use pure key values
-    if (e.key === "ArrowDown") {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      e.stopPropagation();
+      setShowFavorites(prev => !prev);
+    } else if (e.key === "ArrowDown") {
       e.preventDefault();
       e.stopPropagation();
       setSelectedIndex((prev) => {
@@ -373,7 +377,6 @@ function App() {
           {isSearchVisible && (
             <input
               ref={inputRef}
-              onKeyDown={handleKeyDown}
               className="search-input-visible"
               type="text"
               placeholder="Search..."
