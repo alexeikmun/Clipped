@@ -60,15 +60,22 @@ function App() {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [showFavorites, setShowFavorites] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Computed state
   const filteredItems = useMemo<SearchResult[]>(() => {
-    if (!searchQuery) {
-      return history.map(item => ({ item }));
+    let items = history;
+    
+    if (showFavorites) {
+      items = items.filter(item => item.is_favorite);
     }
 
-    const fuse = new Fuse(history, {
+    if (!searchQuery) {
+      return items.map(item => ({ item }));
+    }
+
+    const fuse = new Fuse(items, {
       keys: ['text'],
       includeScore: true,
       includeMatches: false,
@@ -82,11 +89,11 @@ function App() {
     return results.map(result => ({
       item: result.item
     }));
-  }, [history, searchQuery]);
+  }, [history, searchQuery, showFavorites]);
 
   // Keep track of latest state for event listeners
-  const stateRef = useRef({ filteredItems, selectedIndex, history, isSearchVisible, searchQuery });
-  stateRef.current = { filteredItems, selectedIndex, history, isSearchVisible, searchQuery };
+  const stateRef = useRef({ filteredItems, selectedIndex, history, isSearchVisible, searchQuery, showFavorites });
+  stateRef.current = { filteredItems, selectedIndex, history, isSearchVisible, searchQuery, showFavorites };
 
   // Initialization effect
   useEffect(() => {
@@ -338,25 +345,28 @@ function App() {
           </div>
           
           <div 
-            onClick={() => {
-              if (isSearchVisible) {
-                setIsSearchVisible(false);
-                setSearchQuery("");
-              } else {
-                setIsSearchVisible(true);
-              }
-            }}
+            onClick={() => setShowFavorites(!showFavorites)}
             style={{ 
               marginLeft: '10px', 
               cursor: 'pointer', 
               display: 'flex', 
               alignItems: 'center',
-              opacity: isSearchVisible ? 0.7 : 1 // Dim slightly if active
+              color: showFavorites ? '#fbbf24' : '#ccc'
             }}
+            title={showFavorites ? "Show all items" : "Show favorites only"}
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: '#ccc' }}>
-              <circle cx="11" cy="11" r="8"></circle>
-              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            <svg 
+              xmlns="http://www.w3.org/2000/svg" 
+              width="20" 
+              height="20" 
+              viewBox="0 0 24 24" 
+              fill={showFavorites ? "currentColor" : "none"} 
+              stroke="currentColor" 
+              strokeWidth="2" 
+              strokeLinecap="round" 
+              strokeLinejoin="round"
+            >
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
             </svg>
           </div>
 
@@ -380,7 +390,7 @@ function App() {
 
         <div className="card-content">
           {filteredItems.length > 0 ? (
-            searchQuery ? (
+            (searchQuery || showFavorites) ? (
               filteredItems.map((result, index) => renderItem(result.item, index))
             ) : (
               // Even in single item view, we use renderItem to show stars
