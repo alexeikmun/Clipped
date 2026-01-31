@@ -7,29 +7,47 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use arboard::Clipboard;
 use enigo::{Enigo, Settings, Keyboard, Direction, Key};
+use uuid::Uuid;
+use serde::{Serialize, Deserialize};
 
 const HISTORY_FILE: &str = "clipboard_history.json";
 const MAX_HISTORY: usize = 999;
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ClipItem {
+    pub id: String,
+    pub text: String,
+    pub is_favorite: bool,
+}
+
 struct AppState {
     is_monitoring: AtomicBool,
-    history: Mutex<Vec<String>>,
+    history: Mutex<Vec<ClipItem>>,
     data_dir: PathBuf,
 }
 
-fn load_history(data_dir: &Path) -> Vec<String> {
+fn load_history(data_dir: &Path) -> Vec<ClipItem> {
     let history_path = data_dir.join(HISTORY_FILE);
     if history_path.exists() {
         if let Ok(content) = fs::read_to_string(history_path) {
-            if let Ok(history) = serde_json::from_str::<Vec<String>>(&content) {
+            // Try to parse as new format
+            if let Ok(history) = serde_json::from_str::<Vec<ClipItem>>(&content) {
                 return history;
+            }
+            // Fallback: try to parse as old format (Vec<String>) and migrate
+            if let Ok(old_history) = serde_json::from_str::<Vec<String>>(&content) {
+                return old_history.into_iter().map(|text| ClipItem {
+                    id: Uuid::new_v4().to_string(),
+                    text,
+                    is_favorite: false,
+                }).collect();
             }
         }
     }
     Vec::new()
 }
 
-fn save_history(data_dir: &Path, history: &[String]) {
+fn save_history(data_dir: &Path, history: &[ClipItem]) {
     let history_path = data_dir.join(HISTORY_FILE);
     if let Ok(content) = serde_json::to_string(history) {
         let _ = fs::write(history_path, content);
@@ -42,9 +60,21 @@ fn set_monitoring(state: tauri::State<AppState>, monitoring: bool) {
 }
 
 #[tauri::command]
-fn get_history(state: tauri::State<AppState>) -> Vec<String> {
+fn get_history(state: tauri::State<AppState>) -> Vec<ClipItem> {
     let history = state.history.lock().unwrap();
     history.clone()
+}
+
+#[tauri::command]
+fn toggle_favorite(state: tauri::State<AppState>, id: String) -> Result<Vec<ClipItem>, String> {
+    let mut history = state.history.lock().unwrap();
+    if let Some(item) = history.iter_mut().find(|item| item.id == id) {
+        item.is_favorite = !item.is_favorite;
+        save_history(&state.data_dir, &history);
+        Ok(history.clone())
+    } else {
+        Err("Item not found".to_string())
+    }
 }
 
 #[tauri::command]
@@ -162,13 +192,35 @@ pub fn run() {
                                     // Update shared state and persist
                                     if let Ok(mut history) = state.history.lock() {
                                         // Check for duplicate at top
-                                        if history.first() != Some(&text) {
-                                            history.insert(0, text.clone());
-                                            if history.len() > MAX_HISTORY {
-                                                history.truncate(MAX_HISTORY);
+                                        let is_duplicate = history.first().map(|item| item.text == text).unwrap_or(false);
+                                        
+                                        if !is_duplicate {
+                                            let new_item = ClipItem {
+                                                id: Uuid::new_v4().to_string(),
+                                                text: text.clone(),
+                                                is_favorite: false,
+                                            };
+                                            
+                                            history.insert(0, new_item.clone());
+                                            
+                                            // Smart truncation: remove non-favorites from the bottom
+                                            while history.len() > MAX_HISTORY {
+                                                // Find the last index that is NOT a favorite
+                                                let last_non_fav_index = history.iter().rposition(|item| !item.is_favorite);
+                                                
+                                                if let Some(index) = last_non_fav_index {
+                                                    history.remove(index);
+                                                } else {
+                                                    // All items are favorites, stop truncating?
+                                                    // Or force remove oldest?
+                                                    // Requirement: "Favorited items are excluded from clip rotation and cannot be automatically deleted."
+                                                    // So we break the loop even if > MAX_HISTORY
+                                                    break;
+                                                }
                                             }
+                                            
                                             save_history(&state.data_dir, &history);
-                                            let _ = app_handle_clone.emit("clipboard-new", &text);
+                                            let _ = app_handle_clone.emit("clipboard-new", &new_item);
                                         }
                                     }
                                 }
@@ -181,7 +233,7 @@ pub fn run() {
             
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history, hide_app])
+        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history, hide_app, toggle_favorite])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

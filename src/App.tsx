@@ -4,8 +4,14 @@ import { listen } from "@tauri-apps/api/event";
 import Fuse from "fuse.js";
 import "./App.css";
 
+interface ClipItem {
+  id: string;
+  text: string;
+  is_favorite: boolean;
+}
+
 interface SearchResult {
-  item: string;
+  item: ClipItem;
 }
 
 const escapeRegExp = (string: string) => {
@@ -31,8 +37,26 @@ const HighlightedText = ({ text, query }: { text: string; query: string }) => {
   );
 };
 
+const StarIcon = ({ filled, onClick, className }: { filled: boolean; onClick?: (e: React.MouseEvent) => void; className?: string }) => (
+  <div className={className} onClick={onClick}>
+    <svg 
+      xmlns="http://www.w3.org/2000/svg" 
+      width="16" 
+      height="16" 
+      viewBox="0 0 24 24" 
+      fill={filled ? "#fbbf24" : "none"} 
+      stroke={filled ? "#fbbf24" : "currentColor"} 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    >
+      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+    </svg>
+  </div>
+);
+
 function App() {
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<ClipItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearchVisible, setIsSearchVisible] = useState(false);
@@ -45,6 +69,7 @@ function App() {
     }
 
     const fuse = new Fuse(history, {
+      keys: ['text'],
       includeScore: true,
       includeMatches: false,
       threshold: 0.4,
@@ -71,12 +96,16 @@ function App() {
     if (!isTauri) {
       console.warn("Not running in Tauri environment. APIs disabled.");
       // Mock data for preview
-      setHistory(["Mock Item 1", "Mock Item 2", "Mock Item 3"]);
+      setHistory([
+        { id: "1", text: "Mock Item 1", is_favorite: false },
+        { id: "2", text: "Mock Item 2", is_favorite: true },
+        { id: "3", text: "Mock Item 3", is_favorite: false }
+      ]);
       return;
     }
 
     // Sync initial state
-    invoke<string[]>("get_history").then((history) => {
+    invoke<ClipItem[]>("get_history").then((history) => {
       if (history && history.length > 0) {
         setHistory(history);
       }
@@ -87,13 +116,21 @@ function App() {
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
-    const unlistenPromise = listen<string>("clipboard-new", (event) => {
+    // Listen for new items (single item or list update? The backend emits "clipboard-new" with the new item)
+    // BUT we need to update the whole list or prepend. 
+    // The backend emits ClipItem.
+    const unlistenPromise = listen<ClipItem>("clipboard-new", (event) => {
       setHistory((prev) => {
         const newItem = event.payload;
-        // Ignore consecutive duplicates
-        if (prev.length > 0 && prev[0] === newItem) return prev;
+        // Ignore consecutive duplicates (check ID or text)
+        if (prev.length > 0 && prev[0].text === newItem.text) return prev;
 
-        // Add new item to top, limit to 999
+        // Add new item to top, limit to 999 (backend handles truncation logic for persistence, but we should sync)
+        // Actually, easiest is to fetch history again or trust the event.
+        // If we append, we might drift from backend logic (smart truncation).
+        // But for UI responsiveness, we append.
+        // We should respect the "exclude favorites from rotation" logic if we were implementing it here,
+        // but backend handles it.
         return [newItem, ...prev].slice(0, 999);
       });
       // Reset selection to top when new item arrives
@@ -158,7 +195,22 @@ function App() {
     }
   }, [selectedIndex]);
 
-  // Keyboard navigation
+  // Toggle favorite
+  const toggleFavorite = async (id: string) => {
+    if ("__TAURI_INTERNALS__" in window) {
+      try {
+        const newHistory = await invoke<ClipItem[]>("toggle_favorite", { id });
+        setHistory(newHistory);
+      } catch (e) {
+        console.error("Failed to toggle favorite:", e);
+      }
+    } else {
+      // Mock toggle
+      setHistory(prev => prev.map(item => 
+        item.id === id ? { ...item, is_favorite: !item.is_favorite } : item
+      ));
+    }
+  };
 
   // Keyboard navigation handler
   const handleKeyDown = async (e: KeyboardEvent | React.KeyboardEvent) => {
@@ -187,9 +239,9 @@ function App() {
       const item = filteredItems[selectedIndex]?.item;
       if (item) {
         if ("__TAURI_INTERNALS__" in window) {
-          await invoke("paste_item", { text: item });
+          await invoke("paste_item", { text: item.text });
         } else {
-          console.log("Mock paste:", item);
+          console.log("Mock paste:", item.text);
         }
         setSearchQuery(""); // Clear search on paste
       }
@@ -241,6 +293,42 @@ function App() {
   }, []); // Run once
 
 
+  const renderItem = (item: ClipItem, index: number) => (
+    <div 
+      key={item.id}
+      className={`list-item ${index === selectedIndex ? 'selected' : ''} ${item.is_favorite ? 'favorited' : ''}`}
+      onClick={() => setSelectedIndex(index)}
+    >
+      {/* Left Star (only if favorited) */}
+      {item.is_favorite && (
+        <StarIcon 
+          filled={true} 
+          className="star-icon-left" 
+          onClick={(e) => { 
+            e.stopPropagation(); 
+            toggleFavorite(item.id); 
+          }} 
+        />
+      )}
+
+      <div className="item-text">
+        <HighlightedText text={item.text} query={searchQuery} />
+      </div>
+
+      {/* Right Star (only if NOT favorited) */}
+      {!item.is_favorite && (
+        <StarIcon 
+          filled={false} 
+          className="star-icon-right" 
+          onClick={(e) => { 
+            e.stopPropagation(); 
+            toggleFavorite(item.id); 
+          }} 
+        />
+      )}
+    </div>
+  );
+
   return (
     <div className="app">
       <div className="card-container">
@@ -252,11 +340,6 @@ function App() {
           <div 
             onClick={() => {
               if (isSearchVisible) {
-                // Optional: Toggle off or just focus? 
-                // Let's toggle off to act as a close button if needed, 
-                // but user asked to "display searchbar". 
-                // If it's already visible, maybe just focus it.
-                // But typically icons toggle. Let's try toggle.
                 setIsSearchVisible(false);
                 setSearchQuery("");
               } else {
@@ -298,19 +381,10 @@ function App() {
         <div className="card-content">
           {filteredItems.length > 0 ? (
             searchQuery ? (
-              filteredItems.map((result, index) => (
-                <div 
-                  key={index}
-                  className={`list-item ${index === selectedIndex ? 'selected' : ''}`}
-                  onClick={() => setSelectedIndex(index)}
-                >
-                  <HighlightedText text={result.item} query={searchQuery} />
-                </div>
-              ))
+              filteredItems.map((result, index) => renderItem(result.item, index))
             ) : (
-              <div className="list-item selected" style={{ cursor: 'default' }}>
-                {filteredItems[selectedIndex]?.item}
-              </div>
+              // Even in single item view, we use renderItem to show stars
+              renderItem(filteredItems[selectedIndex]?.item, selectedIndex)
             )
           ) : (
             <div style={{ padding: '20px', textAlign: 'center', color: '#888' }}>
