@@ -1,4 +1,5 @@
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { useMemo } from 'react';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 // @ts-ignore
 import createElement from 'react-syntax-highlighter/dist/esm/create-element';
@@ -81,14 +82,21 @@ export const ContentPreview = ({ text, query }: ContentPreviewProps) => {
     lineHeight: 'inherit',
   };
 
+  const terms = useMemo(() => query.split(/\s+/).filter(t => t.length > 0), [query]);
+  const pattern = useMemo(() => {
+     if (terms.length === 0) return null;
+     const sortedTerms = [...terms].sort((a, b) => b.length - a.length);
+     return new RegExp(`(${sortedTerms.map(escapeRegExp).join('|')})`, 'gi');
+  }, [terms]);
+
   const renderer = ({ rows, stylesheet, useInlineStyles }: any) => {
     return rows.map((node: any, i: number) => {
       // Deep clone node to avoid mutating original if reused (though likely not)
       // Actually we need to traverse the node tree and split text nodes that match the query
       
       const highlightNode = (n: any): any => {
-        if (n.type === 'text' && query) {
-          const parts = n.value.split(new RegExp(`(${escapeRegExp(query)})`, 'gi'));
+        if (n.type === 'text' && pattern) {
+          const parts = n.value.split(pattern);
           if (parts.length === 1) return n;
 
           // If matched, we need to return an array of nodes, but we are inside map/recursion that expects one node object?
@@ -103,7 +111,8 @@ export const ContentPreview = ({ text, query }: ContentPreviewProps) => {
           // So I can't use simple recursion that returns 'n'.
           // I need a traversal that returns an array of nodes.
           return parts.map((part: string) => {
-            if (part.toLowerCase() === query.toLowerCase()) {
+            const isMatch = terms.some(term => term.toLowerCase() === part.toLowerCase());
+            if (isMatch) {
               return {
                 type: 'element',
                 tagName: 'span',

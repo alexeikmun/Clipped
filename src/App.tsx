@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import Fuse from "fuse.js";
 import "./App.css";
 import { ContentPreview } from "./components/ContentPreview";
 
@@ -13,6 +12,7 @@ interface ClipItem {
 
 interface SearchResult {
   item: ClipItem;
+  score: number;
 }
 
 const StarIcon = ({ filled, onClick, className }: { filled: boolean; onClick?: (e: React.MouseEvent) => void; className?: string }) => (
@@ -50,23 +50,43 @@ function App() {
     }
 
     if (!searchQuery) {
-      return items.map(item => ({ item }));
+      return items.map(item => ({ item, score: 0 }));
     }
 
-    const fuse = new Fuse(items, {
-      keys: ['text'],
-      includeScore: true,
-      includeMatches: false,
-      threshold: 0.4,
-      ignoreLocation: true,
-      useExtendedSearch: true,
-      minMatchCharLength: 2,
+    const lowerQuery = searchQuery.toLowerCase();
+    const terms = lowerQuery.split(/\s+/).filter(t => t.length > 0);
+
+    if (terms.length === 0) {
+      return items.map(item => ({ item, score: 0 }));
+    }
+
+    const results: SearchResult[] = [];
+
+    items.forEach(item => {
+      const lowerText = item.text.toLowerCase();
+      
+      // Strict AND matching: all terms must be present
+      const allTermsMatch = terms.every(term => lowerText.includes(term));
+      
+      if (allTermsMatch) {
+        // Calculate a simple score for sorting
+        // 1. Exact match (highest)
+        // 2. Starts with query (high)
+        // 3. Contains all terms (base)
+        // 4. Term proximity (optional, maybe later)
+        
+        let score = 1;
+        if (lowerText === lowerQuery) score += 100;
+        else if (lowerText.startsWith(lowerQuery)) score += 50;
+        
+        // Boost if terms are close to each other or in order?
+        // For now, just recency (preserved by loop order) + prefix match is good enough.
+        
+        results.push({ item, score });
+      }
     });
 
-    const results = fuse.search(searchQuery);
-    return results.map(result => ({
-      item: result.item
-    }));
+    return results;
   }, [history, searchQuery, showFavorites]);
 
   // Keep track of latest state for event listeners
