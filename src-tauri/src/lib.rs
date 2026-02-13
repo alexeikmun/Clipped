@@ -1,4 +1,7 @@
 use tauri::{AppHandle, Manager, Emitter, WindowEvent};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
@@ -11,6 +14,8 @@ use uuid::Uuid;
 use serde::{Serialize, Deserialize};
 
 const HISTORY_FILE: &str = "clipboard_history.json";
+const SETTINGS_FILE: &str = "settings.json";
+const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+Shift+.";
 const MAX_HISTORY: usize = 999;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -20,10 +25,16 @@ pub struct ClipItem {
     pub is_favorite: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AppSettings {
+    pub shortcut: String,
+}
+
 struct AppState {
     is_monitoring: AtomicBool,
     history: Mutex<Vec<ClipItem>>,
     data_dir: PathBuf,
+    settings: Mutex<AppSettings>,
 }
 
 fn load_history(data_dir: &Path) -> Vec<ClipItem> {
@@ -51,6 +62,29 @@ fn save_history(data_dir: &Path, history: &[ClipItem]) {
     let history_path = data_dir.join(HISTORY_FILE);
     if let Ok(content) = serde_json::to_string(history) {
         let _ = fs::write(history_path, content);
+    }
+}
+
+fn load_settings(data_dir: &Path) -> AppSettings {
+    let settings_path = data_dir.join(SETTINGS_FILE);
+    if settings_path.exists() {
+        if let Ok(content) = fs::read_to_string(settings_path) {
+            if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
+                if !settings.shortcut.trim().is_empty() {
+                    return settings;
+                }
+            }
+        }
+    }
+    AppSettings {
+        shortcut: DEFAULT_SHORTCUT.to_string(),
+    }
+}
+
+fn save_settings(data_dir: &Path, settings: &AppSettings) {
+    let settings_path = data_dir.join(SETTINGS_FILE);
+    if let Ok(content) = serde_json::to_string(settings) {
+        let _ = fs::write(settings_path, content);
     }
 }
 
@@ -111,13 +145,47 @@ fn hide_app(app: AppHandle, state: tauri::State<AppState>) {
     state.is_monitoring.store(true, Ordering::Relaxed);
 }
 
+#[tauri::command]
+fn get_settings(state: tauri::State<AppState>) -> AppSettings {
+    let settings = state.settings.lock().unwrap();
+    settings.clone()
+}
+
+#[tauri::command]
+fn set_shortcut(app: AppHandle, state: tauri::State<AppState>, shortcut: String) -> Result<String, String> {
+    let trimmed = shortcut.trim();
+    if trimmed.is_empty() {
+        return Err("Shortcut cannot be empty".to_string());
+    }
+
+    let parsed = trimmed.parse::<Shortcut>().map_err(|e| e.to_string())?;
+    let mut settings = state.settings.lock().unwrap();
+    let current = settings.shortcut.clone();
+    if current == trimmed {
+        return Ok(current);
+    }
+
+    let manager = app.global_shortcut();
+    let _ = manager.unregister_all();
+    if let Err(error) = manager.register(parsed) {
+        if let Ok(previous) = current.parse::<Shortcut>() {
+            let _ = manager.register(previous);
+        }
+        return Err(error.to_string());
+    }
+
+    settings.shortcut = trimmed.to_string();
+    save_settings(&state.data_dir, &settings);
+    Ok(settings.shortcut.clone())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcut("Ctrl+Alt+Shift+.")
+                .with_shortcut(DEFAULT_SHORTCUT)
                 .expect("Failed to register shortcut")
                 .with_handler(|app, _shortcut, event| {
                     if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
@@ -169,13 +237,57 @@ pub fn run() {
             }
 
             let history = load_history(&data_dir);
+            let settings = load_settings(&data_dir);
 
             let state = AppState {
                 is_monitoring: AtomicBool::new(true),
                 history: Mutex::new(history),
                 data_dir: data_dir.clone(),
+                settings: Mutex::new(settings.clone()),
             };
             app.manage(state);
+
+            if settings.shortcut != DEFAULT_SHORTCUT {
+                let manager = app.global_shortcut();
+                let _ = manager.unregister_all();
+                if let Ok(parsed) = settings.shortcut.parse::<Shortcut>() {
+                    let _ = manager.register(parsed);
+                }
+            }
+
+            let icon = app.default_window_icon().cloned();
+            if let Some(icon) = icon {
+                let tray_menu = Menu::with_items(
+                    app,
+                    &[&MenuItem::with_id(app, "tray-exit", "Exit", true, None::<&str>)?],
+                )?;
+                let tray_icon = TrayIconBuilder::new()
+                    .icon(icon)
+                    .menu(&tray_menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| {
+                        if event.id() == "tray-exit" {
+                            app.exit(0);
+                        }
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, .. } = event {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.center();
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                let _ = window.emit("open-settings", ());
+                                let state = app.state::<AppState>();
+                                state.is_monitoring.store(false, Ordering::Relaxed);
+                            }
+                        }
+                    })
+                    .build(app);
+                if let Ok(tray_icon) = tray_icon {
+                    app.manage(tray_icon);
+                }
+            }
 
             let app_handle_clone = app.handle().clone();
             thread::spawn(move || {
@@ -233,7 +345,7 @@ pub fn run() {
             
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history, hide_app, toggle_favorite])
+        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history, hide_app, toggle_favorite, get_settings, set_shortcut])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -15,6 +15,10 @@ interface SearchResult {
   score: number;
 }
 
+interface AppSettings {
+  shortcut: string;
+}
+
 const StarIcon = ({ filled, onClick, className }: { filled: boolean; onClick?: (e: React.MouseEvent) => void; className?: string }) => (
   <div className={className} onClick={onClick}>
     <svg 
@@ -39,7 +43,13 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearchVisible, setIsSearchVisible] = useState(false);
   const [showFavorites, setShowFavorites] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [shortcut, setShortcut] = useState("Ctrl+Alt+Shift+.");
+  const [shortcutInput, setShortcutInput] = useState("");
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
+  const [isSavingShortcut, setIsSavingShortcut] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const shortcutInputRef = useRef<HTMLInputElement>(null);
 
   // Computed state
   const filteredItems = useMemo<SearchResult[]>(() => {
@@ -90,8 +100,8 @@ function App() {
   }, [history, searchQuery, showFavorites]);
 
   // Keep track of latest state for event listeners
-  const stateRef = useRef({ filteredItems, selectedIndex, history, isSearchVisible, searchQuery, showFavorites });
-  stateRef.current = { filteredItems, selectedIndex, history, isSearchVisible, searchQuery, showFavorites };
+  const stateRef = useRef({ filteredItems, selectedIndex, history, isSearchVisible, searchQuery, showFavorites, showSettings, shortcut });
+  stateRef.current = { filteredItems, selectedIndex, history, isSearchVisible, searchQuery, showFavorites, showSettings, shortcut };
 
   // Initialization effect
   useEffect(() => {
@@ -118,6 +128,12 @@ function App() {
     invoke<ClipItem[]>("get_history").then((history) => {
       if (history && history.length > 0) {
         setHistory(history);
+      }
+    });
+    invoke<AppSettings>("get_settings").then((settings) => {
+      if (settings?.shortcut) {
+        setShortcut(settings.shortcut);
+        setShortcutInput(settings.shortcut);
       }
     });
     return () => {
@@ -171,9 +187,18 @@ function App() {
       });
     });
 
+    const unlistenSettingsPromise = listen("open-settings", () => {
+      setShowSettings(true);
+      setIsSearchVisible(false);
+      setSearchQuery("");
+      setShortcutError(null);
+      setShortcutInput(stateRef.current.shortcut);
+    });
+
     return () => {
       unlistenPromise.then((f) => f());
       unlistenShortcutPromise.then((f) => f());
+      unlistenSettingsPromise.then((f) => f());
     };
   }, []); // Run once on mount
 
@@ -227,7 +252,16 @@ function App() {
 
   // Keyboard navigation handler
   const handleKeyDown = async (e: KeyboardEvent | React.KeyboardEvent) => {
-    const { filteredItems, selectedIndex, isSearchVisible } = stateRef.current;
+    const { filteredItems, selectedIndex, isSearchVisible, showSettings } = stateRef.current;
+
+    if (showSettings) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setShowSettings(false);
+      }
+      return;
+    }
 
     // Use pure key values
     if (e.key === "Tab") {
@@ -309,6 +343,66 @@ function App() {
     };
   }, []); // Run once
 
+  useEffect(() => {
+    if (showSettings) {
+      shortcutInputRef.current?.focus();
+      shortcutInputRef.current?.select();
+    }
+  }, [showSettings]);
+
+  const saveShortcut = async () => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    setShortcutError(null);
+    setIsSavingShortcut(true);
+    try {
+      const updated = await invoke<string>("set_shortcut", { shortcut: shortcutInput });
+      setShortcut(updated);
+      setShortcutInput(updated);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setShortcutError(message);
+    } finally {
+      setIsSavingShortcut(false);
+    }
+  };
+
+  const normalizeKey = (key: string) => {
+    if (key === " ") return "Space";
+    if (key.length === 1) return key.toUpperCase();
+    const map: Record<string, string> = {
+      ArrowUp: "Up",
+      ArrowDown: "Down",
+      ArrowLeft: "Left",
+      ArrowRight: "Right",
+      Escape: "Esc",
+      Backspace: "Backspace",
+      Delete: "Delete",
+      Enter: "Enter",
+      Tab: "Tab",
+      Home: "Home",
+      End: "End",
+      PageUp: "PageUp",
+      PageDown: "PageDown",
+      Insert: "Insert",
+    };
+    return map[key] ?? key;
+  };
+
+  const buildShortcutFromEvent = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const parts: string[] = [];
+    if (e.ctrlKey) parts.push("Ctrl");
+    if (e.altKey) parts.push("Alt");
+    if (e.shiftKey) parts.push("Shift");
+    if (e.metaKey) parts.push("Meta");
+
+    const isModifier = e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta";
+    if (!isModifier) {
+      const key = normalizeKey(e.key);
+      if (key) parts.push(key);
+    }
+
+    return parts.length > 0 && !isModifier ? parts.join("+") : "";
+  };
 
   const renderItem = (item: ClipItem, index: number) => (
     <div 
@@ -349,66 +443,108 @@ function App() {
   return (
     <div className="app">
       <div className="card-container">
-        <div className="header-row">
-          <div className="counter-badge">
-            {filteredItems.length > 0 ? selectedIndex + 1 : 0}
+        {showSettings ? (
+          <div className="header-row settings-header">
+            <div className="settings-header-title">Settings</div>
           </div>
-          
-          <div 
-            onClick={() => setShowFavorites(!showFavorites)}
-            style={{ 
-              marginLeft: '10px', 
-              cursor: 'pointer', 
-              display: 'flex', 
-              alignItems: 'center',
-              color: showFavorites ? '#fbbf24' : '#ccc'
-            }}
-            title={showFavorites ? "Show all items" : "Show favorites only"}
-          >
-            <svg 
-              xmlns="http://www.w3.org/2000/svg" 
-              width="20" 
-              height="20" 
-              viewBox="0 0 24 24" 
-              fill={showFavorites ? "currentColor" : "none"} 
-              stroke="currentColor" 
-              strokeWidth="2" 
-              strokeLinecap="round" 
-              strokeLinejoin="round"
-            >
-              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
-            </svg>
-          </div>
-
-          {isSearchVisible && (
-            <input
-              ref={inputRef}
-              className="search-input-visible"
-              type="text"
-              placeholder="Search..."
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setSelectedIndex(0);
+        ) : (
+          <div className="header-row">
+            <div className="counter-badge">
+              {filteredItems.length > 0 ? selectedIndex + 1 : 0}
+            </div>
+            
+            <div 
+              onClick={() => setShowFavorites(!showFavorites)}
+              style={{ 
+                marginLeft: '10px', 
+                cursor: 'pointer', 
+                display: 'flex', 
+                alignItems: 'center',
+                color: showFavorites ? '#fbbf24' : '#ccc'
               }}
-              spellCheck={false}
-              autoFocus
-            />
-          )}
-        </div>
+              title={showFavorites ? "Show all items" : "Show favorites only"}
+            >
+              <svg 
+                xmlns="http://www.w3.org/2000/svg" 
+                width="20" 
+                height="20" 
+                viewBox="0 0 24 24" 
+                fill={showFavorites ? "currentColor" : "none"} 
+                stroke="currentColor" 
+                strokeWidth="2" 
+                strokeLinecap="round" 
+                strokeLinejoin="round"
+              >
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+              </svg>
+            </div>
+
+            {isSearchVisible && (
+              <input
+                ref={inputRef}
+                className="search-input-visible"
+                type="text"
+                placeholder="Search..."
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setSelectedIndex(0);
+                }}
+                spellCheck={false}
+                autoFocus
+              />
+            )}
+          </div>
+        )}
 
         <div className="card-content">
-          {filteredItems.length > 0 ? (
-            (searchQuery || showFavorites) ? (
-              filteredItems.map((result, index) => renderItem(result.item, index))
-            ) : (
-              // Even in single item view, we use renderItem to show stars
-              renderItem(filteredItems[selectedIndex]?.item, selectedIndex)
-            )
-          ) : (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#888' }}>
-              {history.length === 0 ? "Clipboard is empty" : "No matches found"}
+          {showSettings ? (
+            <div className="settings-panel">
+              <div className="settings-field">
+                <div className="settings-label">Open clipboard shortcut</div>
+                <input
+                  ref={shortcutInputRef}
+                  className="settings-input"
+                  type="text"
+                  value={shortcutInput}
+                  readOnly
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") return;
+                    const shortcutValue = buildShortcutFromEvent(e);
+                    if (shortcutValue) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setShortcutInput(shortcutValue);
+                    }
+                  }}
+                  spellCheck={false}
+                  placeholder="Ctrl+Alt+Shift+."
+                />
+              </div>
+              {shortcutError && <div className="settings-error">{shortcutError}</div>}
+              <div className="settings-actions">
+                <button className="settings-button" onClick={saveShortcut} disabled={isSavingShortcut}>
+                  Save
+                </button>
+                <button className="settings-button secondary" onClick={() => setShowSettings(false)} disabled={isSavingShortcut}>
+                  Back
+                </button>
+              </div>
+              <div className="settings-hint">Current: {shortcut}</div>
             </div>
+          ) : (
+            filteredItems.length > 0 ? (
+              (searchQuery || showFavorites) ? (
+                filteredItems.map((result, index) => renderItem(result.item, index))
+              ) : (
+                // Even in single item view, we use renderItem to show stars
+                renderItem(filteredItems[selectedIndex]?.item, selectedIndex)
+              )
+            ) : (
+              <div style={{ padding: '20px', textAlign: 'center', color: '#888' }}>
+                {history.length === 0 ? "Clipboard is empty" : "No matches found"}
+              </div>
+            )
           )}
         </div>
       </div>

@@ -76,6 +76,88 @@ body {
   border: none;
 }
 
+.settings-header {
+  justify-content: center;
+}
+
+.settings-header-title {
+  color: #ccc;
+  font-size: 1.1em;
+  letter-spacing: 0.3px;
+}
+
+.settings-panel {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-title {
+  font-size: 1.1em;
+  color: #fff;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-label {
+  color: #aaa;
+  font-size: 0.95em;
+}
+
+.settings-input {
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 1em;
+  outline: none;
+}
+
+.settings-input:focus {
+  border-color: rgba(100, 108, 255, 0.6);
+}
+
+.settings-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-button {
+  background: #646cff;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.95em;
+}
+
+.settings-button.secondary {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.settings-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings-error {
+  color: #f87171;
+  font-size: 0.9em;
+}
+
+.settings-hint {
+  color: #777;
+  font-size: 0.85em;
+}
+
 .counter-badge {
   background-color: rgba(0, 0, 0, 0.3);
   color: #ccc;
