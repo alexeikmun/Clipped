@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "clipped",
-  "version": "0.3.0",
+  "version": "0.2.0",
   "identifier": "com.alexis.clipped-app",
   "build": {
     "beforeDevCommand": "npm run dev",
