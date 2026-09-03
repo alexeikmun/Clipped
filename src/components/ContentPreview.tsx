@@ -1,9 +1,19 @@
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { useMemo } from 'react';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 // @ts-ignore
+import json from 'react-syntax-highlighter/dist/esm/languages/prism/json';
+// @ts-ignore
+import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash';
+// @ts-ignore
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript';
+// @ts-ignore
 import createElement from 'react-syntax-highlighter/dist/esm/create-element';
 import { HighlightedText, escapeRegExp } from './HighlightedText';
+
+SyntaxHighlighter.registerLanguage('json', json);
+SyntaxHighlighter.registerLanguage('bash', bash);
+SyntaxHighlighter.registerLanguage('typescript', typescript);
 
 interface ContentPreviewProps {
   text: string;
