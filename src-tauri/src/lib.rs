@@ -197,6 +197,7 @@ pub fn run() {
                                 let _ = window.center();
                                 let _ = window.show();
                                 let _ = window.set_focus();
+                                let _ = window.emit("modal-opened", ());
                                 state.is_monitoring.store(false, Ordering::Relaxed);
                             }
                         }

@@ -23,12 +23,17 @@ if (!fs.existsSync(sourceDir)) {
     process.exit(1);
 }
 
-// Read files from source directory
+// Read current version from package.json
+const pkgPath = path.join(projectRoot, 'package.json');
+const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+const currentVersion = pkg.version;
+
+// Read files from source directory matching current version
 const files = fs.readdirSync(sourceDir);
-const exeFiles = files.filter(file => file.endsWith('.exe'));
+const exeFiles = files.filter(file => file.endsWith('.exe') && file.includes(`_${currentVersion}_`));
 
 if (exeFiles.length === 0) {
-    console.log('No .exe files found to copy.');
+    console.log(`No .exe files found matching version ${currentVersion} to copy.`);
     process.exit(0);
 }
 

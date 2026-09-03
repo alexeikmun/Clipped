@@ -195,10 +195,18 @@ function App() {
       setShortcutInput(stateRef.current.shortcut);
     });
 
+    const unlistenModalOpenedPromise = listen("modal-opened", () => {
+      setShowSettings(false);
+      setIsSearchVisible(false);
+      setSearchQuery("");
+      setSelectedIndex(0);
+    });
+
     return () => {
       unlistenPromise.then((f) => f());
       unlistenShortcutPromise.then((f) => f());
       unlistenSettingsPromise.then((f) => f());
+      unlistenModalOpenedPromise.then((f) => f());
     };
   }, []); // Run once on mount
 
@@ -209,18 +217,25 @@ function App() {
     }
   }, [filteredItems.length, selectedIndex]);
 
-  // Focus input on window focus
+  // Focus input when search becomes visible
+  useEffect(() => {
+    if (isSearchVisible) {
+      inputRef.current?.focus();
+    }
+  }, [isSearchVisible]);
+
+  // Focus input on window focus if search is visible
   useEffect(() => {
     const handleFocus = () => {
-      inputRef.current?.focus();
+      if (isSearchVisible && !showSettings) {
+        inputRef.current?.focus();
+      }
     };
     window.addEventListener("focus", handleFocus);
-    inputRef.current?.focus();
-
     return () => {
       window.removeEventListener("focus", handleFocus);
     };
-  }, []);
+  }, [isSearchVisible, showSettings]);
 
   // Scroll selected item into view
   useEffect(() => {
@@ -252,7 +267,7 @@ function App() {
 
   // Keyboard navigation handler
   const handleKeyDown = async (e: KeyboardEvent | React.KeyboardEvent) => {
-    const { filteredItems, selectedIndex, isSearchVisible, showSettings } = stateRef.current;
+    const { filteredItems, selectedIndex, isSearchVisible, showSettings, searchQuery } = stateRef.current;
 
     if (showSettings) {
       if (e.key === "Escape") {
@@ -294,6 +309,7 @@ function App() {
         } else {
           console.log("Mock paste:", item.text);
         }
+        setIsSearchVisible(false);
         setSearchQuery(""); // Clear search on paste
       }
     } else if (e.key === "Escape") {
@@ -302,10 +318,10 @@ function App() {
       e.stopPropagation();
 
       // Clear search first
-      setSearchQuery("");
-
-      if (isSearchVisible) {
+      if (isSearchVisible || searchQuery) {
         setIsSearchVisible(false);
+        setSearchQuery("");
+        setSelectedIndex(0);
         return;
       }
 
@@ -321,7 +337,7 @@ function App() {
         console.warn("Not in Tauri, cannot hide window");
       }
     } else if (
-      (!isSearchVisible || document.activeElement !== inputRef.current) &&
+      !isSearchVisible &&
       e.key.length === 1 &&
       !e.ctrlKey &&
       !e.metaKey &&
@@ -331,7 +347,56 @@ function App() {
       setIsSearchVisible(true);
       setSearchQuery(e.key);
       setSelectedIndex(0);
+    } else if (
+      isSearchVisible &&
+      document.activeElement !== inputRef.current &&
+      e.key.length === 1 &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey
+    ) {
+      e.preventDefault();
       inputRef.current?.focus();
+      setSearchQuery(prev => prev + e.key);
+      setSelectedIndex(0);
+    } else if (
+      isSearchVisible &&
+      (e.key === "Backspace" || e.key === "Delete") &&
+      !searchQuery
+    ) {
+      e.preventDefault();
+      setIsSearchVisible(false);
+      setSelectedIndex(0);
+    } else if (
+      isSearchVisible &&
+      document.activeElement !== inputRef.current &&
+      e.key === "Backspace"
+    ) {
+      e.preventDefault();
+      inputRef.current?.focus();
+      setSearchQuery((prev) => {
+        const next = prev.slice(0, -1);
+        if (!next) {
+          setIsSearchVisible(false);
+        }
+        return next;
+      });
+      setSelectedIndex(0);
+    } else if (
+      isSearchVisible &&
+      document.activeElement !== inputRef.current &&
+      e.key === "Delete"
+    ) {
+      e.preventDefault();
+      inputRef.current?.focus();
+      setSearchQuery((prev) => {
+        const next = prev.slice(1);
+        if (!next) {
+          setIsSearchVisible(false);
+        }
+        return next;
+      });
+      setSelectedIndex(0);
     }
   };
 
@@ -408,7 +473,12 @@ function App() {
     <div 
       key={item.id}
       className={`list-item ${index === selectedIndex ? 'selected' : ''} ${item.is_favorite ? 'favorited' : ''}`}
-      onClick={() => setSelectedIndex(index)}
+      onClick={() => {
+        setSelectedIndex(index);
+        if (isSearchVisible) {
+          inputRef.current?.focus();
+        }
+      }}
     >
       {/* Left Star (only if favorited) */}
       {item.is_favorite && (
@@ -418,6 +488,9 @@ function App() {
           onClick={(e) => { 
             e.stopPropagation(); 
             toggleFavorite(item.id); 
+            if (isSearchVisible) {
+              inputRef.current?.focus();
+            }
           }} 
         />
       )}
@@ -434,6 +507,9 @@ function App() {
           onClick={(e) => { 
             e.stopPropagation(); 
             toggleFavorite(item.id); 
+            if (isSearchVisible) {
+              inputRef.current?.focus();
+            }
           }} 
         />
       )}
@@ -454,7 +530,12 @@ function App() {
             </div>
             
             <div 
-              onClick={() => setShowFavorites(!showFavorites)}
+              onClick={() => {
+                setShowFavorites(!showFavorites);
+                if (isSearchVisible) {
+                  inputRef.current?.focus();
+                }
+              }}
               style={{ 
                 marginLeft: '10px', 
                 cursor: 'pointer', 
@@ -487,8 +568,19 @@ function App() {
                 placeholder="Search..."
                 value={searchQuery}
                 onChange={(e) => {
-                  setSearchQuery(e.target.value);
+                  const val = e.target.value;
+                  setSearchQuery(val);
                   setSelectedIndex(0);
+                  if (!val) {
+                    setIsSearchVisible(false);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if ((e.key === "Backspace" || e.key === "Delete") && !searchQuery) {
+                    e.preventDefault();
+                    setIsSearchVisible(false);
+                    setSelectedIndex(0);
+                  }
                 }}
                 spellCheck={false}
                 autoFocus
