@@ -182,7 +182,6 @@ fn center_and_focus_window(window: &MainWindow) {
 #[cfg(target_os = "windows")]
 fn is_window_foreground() -> bool {
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow};
 
     unsafe {
