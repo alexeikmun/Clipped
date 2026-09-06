@@ -286,14 +286,18 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
+  white-space: normal;
+  word-break: normal;
 }
 
 .clip-image-preview.compact {
   flex-direction: row;
+  align-items: center;
   justify-content: flex-start;
   gap: 12px;
+  width: 100%;
 }
 
 .preview-image-wrapper {
@@ -304,6 +308,20 @@ body {
   border-radius: 8px;
   padding: 4px;
   max-width: 100%;
+  flex-shrink: 0;
+}
+
+.preview-image-wrapper.compact {
+  width: 80px;
+  height: 52px;
+  padding: 2px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
 .preview-image {
@@ -315,32 +333,62 @@ body {
 }
 
 .preview-image.compact {
-  max-width: 80px;
-  max-height: 50px;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.clip-image-details {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+  min-width: 0;
+}
+
+.clip-image-details.compact {
+  align-items: flex-start;
+  flex: 1;
+  gap: 5px;
+  min-width: 0;
 }
 
 .clip-image-meta {
   display: flex;
   align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 
 .clip-image-badge {
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: #aaa;
-  font-size: 0.8em;
+  font-size: 0.78em;
   padding: 2px 8px;
   border-radius: 6px;
   letter-spacing: 0.3px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  word-break: keep-all;
 }
 
 .clip-image-fallback {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   color: #aaa;
   font-size: 0.9em;
   padding: 6px 0;
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+  word-break: normal;
 }
 
 .clip-image-fallback.compact {
@@ -352,32 +400,39 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .clip-ocr-badge {
   background: rgba(99, 102, 241, 0.2);
   border: 1px solid rgba(99, 102, 241, 0.4);
   color: #a5b4fc;
-  font-size: 0.75em;
+  font-size: 0.72em;
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 4px;
   letter-spacing: 0.5px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  word-break: keep-all;
 }
 
 .clip-ocr-copy-btn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.1);
   color: #ccc;
-  font-size: 0.75em;
+  font-size: 0.72em;
   padding: 2px 7px;
   border-radius: 5px;
   cursor: pointer;
   transition: all 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
+  word-break: keep-all;
 }
 
 .clip-ocr-copy-btn:hover {
@@ -392,16 +447,18 @@ body {
 
 .clip-ocr-snippet {
   width: 100%;
-  font-size: 0.82em;
-  color: #bbb;
+  max-width: 100%;
+  font-size: 0.8em;
+  color: #aaa;
   background: rgba(0, 0, 0, 0.3);
-  padding: 4px 8px;
-  border-radius: 6px;
-  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   box-sizing: border-box;
+  min-width: 0;
+  margin-top: 0;
 }
 
 .clip-ocr-card-container {

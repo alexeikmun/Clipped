@@ -1,45 +1,27 @@
+mod db;
+
 use tauri::{AppHandle, Manager, Emitter, WindowEvent};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 use arboard::Clipboard;
 use enigo::{Enigo, Settings, Keyboard, Direction, Key};
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
+use xxhash_rust::xxh3::xxh3_64;
 
-const HISTORY_FILE: &str = "clipboard_history.json";
+pub use db::{ClipItem, Database};
+
 const SETTINGS_FILE: &str = "settings.json";
 const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+Shift+.";
 const MAX_HISTORY: usize = 999;
-
-fn default_clip_type() -> String {
-    "text".to_string()
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ClipItem {
-    pub id: String,
-    pub text: String,
-    pub is_favorite: bool,
-    #[serde(default = "default_clip_type")]
-    pub clip_type: String,
-    #[serde(default)]
-    pub image_path: Option<String>,
-    #[serde(default)]
-    pub image_width: Option<u32>,
-    #[serde(default)]
-    pub image_height: Option<u32>,
-    #[serde(default)]
-    pub ocr_text: Option<String>,
-}
 
 #[cfg(target_os = "windows")]
 fn extract_ocr_text(image_path: &Path) -> Option<String> {
@@ -76,68 +58,20 @@ pub struct AppSettings {
     pub shortcut: String,
 }
 
+enum ClipboardEvent {
+    Text(String),
+    Image {
+        width: usize,
+        height: usize,
+        bytes: Vec<u8>,
+    },
+}
+
 struct AppState {
     is_monitoring: AtomicBool,
-    history: RwLock<Vec<ClipItem>>,
+    db: Arc<Database>,
     data_dir: PathBuf,
     settings: RwLock<AppSettings>,
-}
-
-fn load_history(data_dir: &Path) -> Vec<ClipItem> {
-    let history_path = data_dir.join(HISTORY_FILE);
-    let Ok(content) = fs::read_to_string(&history_path) else {
-        return Vec::new();
-    };
-
-    // Try to parse as new format
-    if let Ok(mut history) = serde_json::from_str::<Vec<ClipItem>>(&content) {
-        let mut needs_save = false;
-        for item in &mut history {
-            if item.clip_type == "image" {
-                if let Some(ref rel_or_abs) = item.image_path {
-                    let path = Path::new(rel_or_abs);
-                    let full_path = if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        data_dir.join(path)
-                    };
-                    item.image_path = Some(full_path.to_string_lossy().replace('\\', "/"));
-
-                    if item.ocr_text.is_none() && full_path.exists() {
-                        if let Some(ocr) = extract_ocr_text(&full_path) {
-                            item.ocr_text = Some(ocr);
-                            needs_save = true;
-                        }
-                    }
-                }
-            }
-        }
-        if needs_save {
-            save_history(data_dir, &history);
-        }
-        return history;
-    }
-    // Fallback: try to parse as old format (Vec<String>) and migrate
-    if let Ok(old_history) = serde_json::from_str::<Vec<String>>(&content) {
-        return old_history.into_iter().map(|text| ClipItem {
-            id: Uuid::new_v4().to_string(),
-            text,
-            is_favorite: false,
-            clip_type: "text".to_string(),
-            image_path: None,
-            image_width: None,
-            image_height: None,
-            ocr_text: None,
-        }).collect();
-    }
-    Vec::new()
-}
-
-fn save_history(data_dir: &Path, history: &[ClipItem]) {
-    let history_path = data_dir.join(HISTORY_FILE);
-    if let Ok(content) = serde_json::to_string(history) {
-        let _ = fs::write(history_path, content);
-    }
 }
 
 fn load_settings(data_dir: &Path) -> AppSettings {
@@ -169,21 +103,18 @@ fn set_monitoring(state: tauri::State<AppState>, monitoring: bool) {
 }
 
 #[tauri::command]
-fn get_history(state: tauri::State<AppState>) -> Vec<ClipItem> {
-    let history = state.history.read().unwrap();
-    history.clone()
+fn get_history(state: tauri::State<AppState>, favorites_only: Option<bool>) -> Result<Vec<ClipItem>, String> {
+    state.db.get_history(MAX_HISTORY, favorites_only.unwrap_or(false)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn toggle_favorite(state: tauri::State<AppState>, id: String) -> Result<Vec<ClipItem>, String> {
-    let mut history = state.history.write().unwrap();
-    if let Some(item) = history.iter_mut().find(|item| item.id == id) {
-        item.is_favorite = !item.is_favorite;
-        save_history(&state.data_dir, &history);
-        Ok(history.clone())
-    } else {
-        Err("Item not found".to_string())
-    }
+fn search_clips(state: tauri::State<AppState>, query: String, favorites_only: Option<bool>) -> Result<Vec<ClipItem>, String> {
+    state.db.search_clips(&query, favorites_only.unwrap_or(false), MAX_HISTORY).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn toggle_favorite(state: tauri::State<AppState>, id: String) -> Result<bool, String> {
+    state.db.toggle_favorite(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -194,24 +125,25 @@ fn paste_item(app: AppHandle, state: tauri::State<AppState>, text: String, id: O
 
     let mut is_image = false;
     let mut image_file_path: Option<PathBuf> = None;
+    let mut paste_text = text;
 
     if let Some(ref item_id) = id {
-        if let Ok(history) = state.history.read() {
-            if let Some(item) = history.iter().find(|i| &i.id == item_id) {
-                if item.clip_type == "image" {
-                    if let Some(ref rel_or_abs) = item.image_path {
-                        let path = Path::new(rel_or_abs);
-                        let full_path = if path.is_absolute() {
-                            path.to_path_buf()
-                        } else {
-                            state.data_dir.join(path)
-                        };
-                        if full_path.exists() {
-                            is_image = true;
-                            image_file_path = Some(full_path);
-                        }
+        if let Ok(Some(clip)) = state.db.get_full_clip(item_id) {
+            if clip.clip_type == "image" {
+                if let Some(ref rel_or_abs) = clip.image_path {
+                    let path = Path::new(rel_or_abs);
+                    let full_path = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        state.data_dir.join(path)
+                    };
+                    if full_path.exists() {
+                        is_image = true;
+                        image_file_path = Some(full_path);
                     }
                 }
+            } else {
+                paste_text = clip.text;
             }
         }
     }
@@ -231,7 +163,7 @@ fn paste_item(app: AppHandle, state: tauri::State<AppState>, text: String, id: O
         }
     } else {
         let backup_text = clipboard.get_text().ok(); 
-        clipboard.set_text(&text).map_err(|e| e.to_string())?;
+        clipboard.set_text(&paste_text).map_err(|e| e.to_string())?;
 
         thread::sleep(Duration::from_millis(100));
         
@@ -305,8 +237,14 @@ fn set_shortcut(app: AppHandle, state: tauri::State<AppState>, shortcut: String)
 }
 
 #[tauri::command]
-fn copy_text(text: String) -> Result<(), String> {
+fn copy_text(state: tauri::State<AppState>, text: String, id: Option<String>) -> Result<(), String> {
     let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
+    if let Some(id_str) = id {
+        if let Ok(Some(clip)) = state.db.get_full_clip(&id_str) {
+            clipboard.set_text(&clip.text).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+    }
     clipboard.set_text(&text).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -339,9 +277,9 @@ pub fn run() {
             if let WindowEvent::Focused(focused) = event {
                 // If window loses focus and is visible, hide it
                 if !focused && window.is_visible().unwrap_or(false) {
-                     let _ = window.hide();
-                     let state = window.state::<AppState>();
-                     state.is_monitoring.store(true, Ordering::Relaxed);
+                    let _ = window.hide();
+                    let state = window.state::<AppState>();
+                    state.is_monitoring.store(true, Ordering::Relaxed);
                 }
             }
         })
@@ -356,7 +294,6 @@ pub fn run() {
                 let autostart_manager = app.autolaunch();
                 if !autostart_manager.is_enabled().unwrap_or(false) {
                     let _ = autostart_manager.enable();
-
                 }
             }
 
@@ -367,12 +304,12 @@ pub fn run() {
                 let _ = fs::create_dir_all(&data_dir);
             }
 
-            let history = load_history(&data_dir);
+            let db = Arc::new(Database::init(&data_dir).expect("failed to initialize sqlite database"));
             let settings = load_settings(&data_dir);
 
             let state = AppState {
                 is_monitoring: AtomicBool::new(true),
-                history: RwLock::new(history),
+                db: db.clone(),
                 data_dir: data_dir.clone(),
                 settings: RwLock::new(settings.clone()),
             };
@@ -421,13 +358,113 @@ pub fn run() {
                 }
             }
 
-            let app_handle_clone = app.handle().clone();
+            // Channel for decoupling clipboard monitoring from DB/OCR/Image writes
+            let (tx, rx) = channel::<ClipboardEvent>();
+
+            // Dedicated worker thread for DB writes, PNG encoding, and OCR
+            let db_worker = db.clone();
+            let app_worker = app.handle().clone();
+            let data_dir_worker = data_dir.clone();
+
             thread::spawn(move || {
-                let mut last_text = String::new();
+                while let Ok(event) = rx.recv() {
+                    match event {
+                        ClipboardEvent::Text(text) => {
+                            // Deduplicate against latest item
+                            if let Ok(Some(latest)) = db_worker.get_latest_item() {
+                                if latest.clip_type == "text" && latest.text == text {
+                                    continue;
+                                }
+                            }
+
+                            let id = Uuid::new_v4().to_string();
+                            let text_len = text.len();
+                            let item = ClipItem {
+                                id: id.clone(),
+                                text: text.clone(),
+                                is_favorite: false,
+                                clip_type: "text".to_string(),
+                                image_path: None,
+                                image_width: None,
+                                image_height: None,
+                                ocr_text: None,
+                                full_text_len: text_len,
+                            };
+
+                            if db_worker.insert_clip(&item).is_ok() {
+                                if let Ok(deleted_images) = db_worker.prune_history(MAX_HISTORY) {
+                                    for p in deleted_images {
+                                        let path = Path::new(&p);
+                                        let full = if path.is_absolute() { path.to_path_buf() } else { data_dir_worker.join(path) };
+                                        let _ = fs::remove_file(full);
+                                    }
+                                }
+
+                                // Emit lean preview to UI
+                                let mut preview_item = item;
+                                if preview_item.text.chars().count() > 1000 {
+                                    preview_item.text = preview_item.text.chars().take(1000).collect();
+                                }
+                                let _ = app_worker.emit("clipboard-new", &preview_item);
+                            }
+                        }
+                        ClipboardEvent::Image { width, height, bytes } => {
+                            let uuid_str = Uuid::new_v4().to_string();
+                            let img_filename = format!("{}.png", uuid_str);
+                            let images_dir = data_dir_worker.join("images");
+                            if !images_dir.exists() {
+                                let _ = fs::create_dir_all(&images_dir);
+                            }
+                            let full_img_path = images_dir.join(&img_filename);
+                            let full_img_path_str = full_img_path.to_string_lossy().replace('\\', "/");
+
+                            if image::save_buffer_with_format(
+                                &full_img_path,
+                                &bytes,
+                                width as u32,
+                                height as u32,
+                                image::ExtendedColorType::Rgba8,
+                                image::ImageFormat::Png,
+                            ).is_ok() {
+                                let ocr_result = extract_ocr_text(&full_img_path);
+                                let item = ClipItem {
+                                    id: uuid_str,
+                                    text: format!("[Image {}x{}]", width, height),
+                                    is_favorite: false,
+                                    clip_type: "image".to_string(),
+                                    image_path: Some(full_img_path_str),
+                                    image_width: Some(width as u32),
+                                    image_height: Some(height as u32),
+                                    ocr_text: ocr_result,
+                                    full_text_len: 0,
+                                };
+
+                                if db_worker.insert_clip(&item).is_ok() {
+                                    if let Ok(deleted_images) = db_worker.prune_history(MAX_HISTORY) {
+                                        for p in deleted_images {
+                                            let path = Path::new(&p);
+                                            let full = if path.is_absolute() { path.to_path_buf() } else { data_dir_worker.join(path) };
+                                            let _ = fs::remove_file(full);
+                                        }
+                                    }
+
+                                    let _ = app_worker.emit("clipboard-new", &item);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Fast clipboard watcher thread: checks & hashes in <0.2ms, dispatches to mpsc channel
+            let app_watcher = app.handle().clone();
+            thread::spawn(move || {
+                let mut last_text_hash: u64 = 0;
                 let mut last_image_hash: u64 = 0;
                 let mut clipboard_opt: Option<Clipboard> = Clipboard::new().ok();
+
                 loop {
-                    let state = app_handle_clone.state::<AppState>();
+                    let state = app_watcher.state::<AppState>();
                     if state.is_monitoring.load(Ordering::Relaxed) {
                         if clipboard_opt.is_none() {
                             clipboard_opt = Clipboard::new().ok();
@@ -439,130 +476,34 @@ pub fn run() {
                                     let trimmed = text.trim();
                                     if !trimmed.is_empty() {
                                         text_found = true;
-                                        if text != last_text {
-                                            last_text = text.clone();
+                                        let hash = xxh3_64(text.as_bytes());
+                                        if hash != last_text_hash {
+                                            last_text_hash = hash;
                                             last_image_hash = 0;
-
-                                            // Update shared state and persist
-                                            if let Ok(mut history) = state.history.write() {
-                                                let is_duplicate = history.first().map(|item| item.text == text).unwrap_or(false);
-
-                                                if !is_duplicate {
-                                                    let new_item = ClipItem {
-                                                        id: Uuid::new_v4().to_string(),
-                                                        text: text.clone(),
-                                                        is_favorite: false,
-                                                        clip_type: "text".to_string(),
-                                                        image_path: None,
-                                                        image_width: None,
-                                                        image_height: None,
-                                                        ocr_text: None,
-                                                    };
-
-                                                    history.insert(0, new_item.clone());
-
-                                                    // Smart truncation: remove non-favorites from the bottom
-                                                    while history.len() > MAX_HISTORY {
-                                                        let last_non_fav_index = history.iter().rposition(|item| !item.is_favorite);
-
-                                                        if let Some(index) = last_non_fav_index {
-                                                            let removed = history.remove(index);
-                                                            if let Some(ref rel_or_abs) = removed.image_path {
-                                                                let p = Path::new(rel_or_abs);
-                                                                let full_p = if p.is_absolute() { p.to_path_buf() } else { state.data_dir.join(p) };
-                                                                let _ = fs::remove_file(full_p);
-                                                            }
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    save_history(&state.data_dir, &history);
-                                                    let _ = app_handle_clone.emit("clipboard-new", &new_item);
-                                                }
-                                            }
+                                            let _ = tx.send(ClipboardEvent::Text(text));
                                         }
                                     }
                                 }
-                                Err(arboard::Error::ContentNotAvailable) => {
-                                    // Clipboard has image or non-text, expected
-                                }
-                                Err(_) => {
-                                    // Transient error
-                                }
+                                Err(arboard::Error::ContentNotAvailable) => {}
+                                Err(_) => {}
                             }
 
                             if !text_found {
                                 match clipboard.get_image() {
                                     Ok(img) => {
-                                        let mut hasher = DefaultHasher::new();
-                                        img.bytes.hash(&mut hasher);
-                                        let img_hash = hasher.finish();
-
-                                        if img_hash != last_image_hash {
-                                            last_image_hash = img_hash;
-                                            last_text.clear();
-
-                                            let uuid_str = Uuid::new_v4().to_string();
-                                            let img_filename = format!("{}.png", uuid_str);
-                                            let images_dir = state.data_dir.join("images");
-                                            if !images_dir.exists() {
-                                                let _ = fs::create_dir_all(&images_dir);
-                                            }
-                                            let full_img_path = images_dir.join(&img_filename);
-                                            let full_img_path_str = full_img_path.to_string_lossy().replace('\\', "/");
-
-                                            if image::save_buffer_with_format(
-                                                &full_img_path,
-                                                &img.bytes,
-                                                img.width as u32,
-                                                img.height as u32,
-                                                image::ExtendedColorType::Rgba8,
-                                                image::ImageFormat::Png,
-                                            ).is_ok() {
-                                                let ocr_result = extract_ocr_text(&full_img_path);
-                                                let new_item = ClipItem {
-                                                    id: uuid_str,
-                                                    text: format!("[Image {}x{}]", img.width, img.height),
-                                                    is_favorite: false,
-                                                    clip_type: "image".to_string(),
-                                                    image_path: Some(full_img_path_str),
-                                                    image_width: Some(img.width as u32),
-                                                    image_height: Some(img.height as u32),
-                                                    ocr_text: ocr_result,
-                                                };
-
-                                                if let Ok(mut history) = state.history.write() {
-                                                    history.insert(0, new_item.clone());
-
-                                                    // Smart truncation: remove non-favorites from the bottom
-                                                    while history.len() > MAX_HISTORY {
-                                                        let last_non_fav_index = history.iter().rposition(|item| !item.is_favorite);
-
-                                                        if let Some(index) = last_non_fav_index {
-                                                            let removed = history.remove(index);
-                                                            if let Some(ref rel_or_abs) = removed.image_path {
-                                                                let p = Path::new(rel_or_abs);
-                                                                let full_p = if p.is_absolute() { p.to_path_buf() } else { state.data_dir.join(p) };
-                                                                let _ = fs::remove_file(full_p);
-                                                            }
-                                                        } else {
-                                                            break;
-                                                        }
-                                                    }
-
-                                                    save_history(&state.data_dir, &history);
-                                                    let _ = app_handle_clone.emit("clipboard-new", &new_item);
-                                                }
-                                            }
+                                        let hash = xxh3_64(&img.bytes);
+                                        if hash != last_image_hash {
+                                            last_image_hash = hash;
+                                            last_text_hash = 0;
+                                            let _ = tx.send(ClipboardEvent::Image {
+                                                width: img.width,
+                                                height: img.height,
+                                                bytes: img.bytes.into_owned(),
+                                            });
                                         }
                                     }
-                                    Err(arboard::Error::ContentNotAvailable) => {
-                                        // No image on clipboard
-                                    }
-                                    Err(_) => {
-                                        // Transient error
-                                    }
+                                    Err(arboard::Error::ContentNotAvailable) => {}
+                                    Err(_) => {}
                                 }
                             }
                         }
@@ -573,7 +514,17 @@ pub fn run() {
             
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history, hide_app, toggle_favorite, get_settings, set_shortcut, copy_text])
+        .invoke_handler(tauri::generate_handler![
+            paste_item,
+            set_monitoring,
+            get_history,
+            search_clips,
+            hide_app,
+            toggle_favorite,
+            get_settings,
+            set_shortcut,
+            copy_text
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

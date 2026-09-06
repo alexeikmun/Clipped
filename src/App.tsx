@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
@@ -14,6 +14,7 @@ interface ClipItem {
   image_width?: number;
   image_height?: number;
   ocr_text?: string;
+  full_text_len?: number;
 }
 
 interface SearchResult {
@@ -57,46 +58,52 @@ function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const shortcutInputRef = useRef<HTMLInputElement>(null);
 
+  // Search & History sync with SQLite backend
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let active = true;
+
+    const timer = setTimeout(() => {
+      const q = searchQuery.trim();
+      if (q) {
+        invoke<ClipItem[]>("search_clips", { query: q, favoritesOnly: showFavorites })
+          .then((items) => {
+            if (active && items) setHistory(items);
+          })
+          .catch(console.error);
+      } else {
+        invoke<ClipItem[]>("get_history", { favoritesOnly: showFavorites })
+          .then((items) => {
+            if (active && items) setHistory(items);
+          })
+          .catch(console.error);
+      }
+    }, 20);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [searchQuery, showFavorites]);
+
   // Computed state
   const filteredItems = useMemo<SearchResult[]>(() => {
-    let items = history;
-    
-    if (showFavorites) {
-      items = items.filter(item => item.is_favorite);
-    }
-
-    if (!searchQuery) {
-      return items.map(item => ({ item, score: 0 }));
-    }
-
-    const lowerQuery = searchQuery.toLowerCase();
-    const terms = lowerQuery.split(/\s+/).filter(t => t.length > 0);
-
-    if (terms.length === 0) {
-      return items.map(item => ({ item, score: 0 }));
-    }
-
-    const results: SearchResult[] = [];
-
-    items.forEach(item => {
-      const lowerText = item.text.toLowerCase();
-      const lowerOcr = (item.ocr_text || "").toLowerCase();
-      const combined = lowerText + " " + lowerOcr;
-      
-      // Strict AND matching: all terms must be present
-      const allTermsMatch = terms.every(term => combined.includes(term));
-      
-      if (allTermsMatch) {
-        let score = 1;
-        if (lowerText === lowerQuery) score += 100;
-        else if (lowerText.startsWith(lowerQuery)) score += 50;
-        else if (lowerOcr.includes(lowerQuery)) score += 30;
-        
-        results.push({ item, score });
+    const isTauri = "__TAURI_INTERNALS__" in window;
+    if (!isTauri) {
+      let items = history;
+      if (showFavorites) {
+        items = items.filter(item => item.is_favorite);
       }
-    });
+      if (!searchQuery) {
+        return items.map(item => ({ item, score: 0 }));
+      }
+      const lowerQuery = searchQuery.toLowerCase();
+      return items
+        .filter(item => (item.text + " " + (item.ocr_text || "")).toLowerCase().includes(lowerQuery))
+        .map(item => ({ item, score: 0 }));
+    }
 
-    return results;
+    return history.map(item => ({ item, score: 0 }));
   }, [history, searchQuery, showFavorites]);
 
   // Keep track of latest state for event listeners
@@ -110,12 +117,10 @@ function App() {
     };
     window.addEventListener("contextmenu", handleContextMenu);
 
-    // Check if running in Tauri environment
     const isTauri = "__TAURI_INTERNALS__" in window;
 
     if (!isTauri) {
       console.warn("Not running in Tauri environment. APIs disabled.");
-      // Mock data for preview
       setHistory([
         { id: "1", text: "Mock Item 1", is_favorite: false },
         { id: "2", text: "Mock Item 2", is_favorite: true },
@@ -124,64 +129,54 @@ function App() {
       return;
     }
 
-    // Sync initial state
-    invoke<ClipItem[]>("get_history").then((history) => {
-      if (history && history.length > 0) {
-        setHistory(history);
+    invoke<ClipItem[]>("get_history", { favoritesOnly: false }).then((items) => {
+      if (items && items.length > 0) {
+        setHistory(items);
       }
     });
+
     invoke<AppSettings>("get_settings").then((settings) => {
       if (settings?.shortcut) {
         setShortcut(settings.shortcut);
         setShortcutInput(settings.shortcut);
       }
     });
+
     return () => {
       window.removeEventListener("contextmenu", handleContextMenu);
     };
-  }, []); // Run once on mount
+  }, []);
 
   // Event listeners effect
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
 
-    // Listen for new items (single item or list update? The backend emits "clipboard-new" with the new item)
-    // BUT we need to update the whole list or prepend. 
-    // The backend emits ClipItem.
     const unlistenPromise = listen<ClipItem>("clipboard-new", (event) => {
       setHistory((prev) => {
         const newItem = event.payload;
-        // Ignore consecutive duplicates (check ID or text)
-        if (prev.length > 0 && prev[0].text === newItem.text) return prev;
+        if (prev.length > 0 && prev[0].id === newItem.id) return prev;
 
-        // Add new item to top, limit to 999 (backend handles truncation logic for persistence, but we should sync)
-        // Actually, easiest is to fetch history again or trust the event.
-        // If we append, we might drift from backend logic (smart truncation).
-        // But for UI responsiveness, we append.
-        // We should respect the "exclude favorites from rotation" logic if we were implementing it here,
-        // but backend handles it.
+        const { searchQuery, showFavorites } = stateRef.current;
+        if (searchQuery.trim()) {
+          return prev;
+        }
+        if (showFavorites && !newItem.is_favorite) {
+          return prev;
+        }
         return [newItem, ...prev].slice(0, 999);
       });
-      // Reset selection to top when new item arrives
       setSelectedIndex(0);
     });
 
-    // Listen for shortcut cycle event
     const unlistenShortcutPromise = listen("shortcut-cycle-next", () => {
-      console.log("Shortcut cycle event received"); // Debug log
       const { history } = stateRef.current;
-
       setSelectedIndex((prev) => {
-        // If we have history, cycle to the next item
         if (history.length > 0) {
           const nextIndex = prev + 1;
-          // Cycle back to 0 if we reach the end
           if (nextIndex >= history.length) {
             return 0;
           }
-          const newIndex = nextIndex;
-          console.log("Cycling from", prev, "to", newIndex); // Debug log
-          return newIndex;
+          return nextIndex;
         }
         return prev;
       });
@@ -199,7 +194,11 @@ function App() {
       setShowSettings(false);
       setIsSearchVisible(false);
       setSearchQuery("");
+      setShowFavorites(false);
       setSelectedIndex(0);
+      invoke<ClipItem[]>("get_history", { favoritesOnly: false }).then((items) => {
+        if (items) setHistory(items);
+      });
     });
 
     return () => {
@@ -208,7 +207,7 @@ function App() {
       unlistenSettingsPromise.then((f) => f());
       unlistenModalOpenedPromise.then((f) => f());
     };
-  }, []); // Run once on mount
+  }, []);
 
   // Ensure selection is valid
   useEffect(() => {
@@ -252,16 +251,23 @@ function App() {
   const toggleFavorite = async (id: string) => {
     if ("__TAURI_INTERNALS__" in window) {
       try {
-        const newHistory = await invoke<ClipItem[]>("toggle_favorite", { id });
-        setHistory(newHistory);
+        await invoke<boolean>("toggle_favorite", { id });
+        setHistory(prev => {
+          const updated = prev.map(item => 
+            item.id === id ? { ...item, is_favorite: !item.is_favorite } : item
+          );
+          return showFavorites ? updated.filter(item => item.is_favorite) : updated;
+        });
       } catch (e) {
         console.error("Failed to toggle favorite:", e);
       }
     } else {
-      // Mock toggle
-      setHistory(prev => prev.map(item => 
-        item.id === id ? { ...item, is_favorite: !item.is_favorite } : item
-      ));
+      setHistory(prev => {
+        const updated = prev.map(item => 
+          item.id === id ? { ...item, is_favorite: !item.is_favorite } : item
+        );
+        return showFavorites ? updated.filter(item => item.is_favorite) : updated;
+      });
     }
   };
 
@@ -278,7 +284,6 @@ function App() {
       return;
     }
 
-    // Use pure key values
     if (e.key === "Tab") {
       e.preventDefault();
       e.stopPropagation();
@@ -288,7 +293,7 @@ function App() {
       e.stopPropagation();
       setSelectedIndex((prev) => {
         const nextIndex = prev + 1;
-        if (nextIndex >= filteredItems.length) return 0; // Cycle to start
+        if (nextIndex >= filteredItems.length) return 0;
         return nextIndex;
       });
     } else if (e.key === "ArrowUp") {
@@ -296,7 +301,7 @@ function App() {
       e.stopPropagation();
       setSelectedIndex((prev) => {
         const nextIndex = prev - 1;
-        if (nextIndex < 0) return filteredItems.length - 1; // Cycle to end
+        if (nextIndex < 0) return filteredItems.length - 1;
         return nextIndex;
       });
     } else if (e.key === "Enter") {
@@ -310,14 +315,12 @@ function App() {
           console.log("Mock paste:", item.text);
         }
         setIsSearchVisible(false);
-        setSearchQuery(""); // Clear search on paste
+        setSearchQuery("");
       }
     } else if (e.key === "Escape") {
-      console.log("Escape key pressed");
       e.preventDefault();
       e.stopPropagation();
 
-      // Clear search first
       if (isSearchVisible || searchQuery) {
         setIsSearchVisible(false);
         setSearchQuery("");
@@ -327,14 +330,10 @@ function App() {
 
       if ("__TAURI_INTERNALS__" in window) {
         try {
-          console.log("Invoking hide_app...");
           await invoke("hide_app");
-          console.log("hide_app invoked successfully");
         } catch (error) {
           console.error("Failed to hide app:", error);
         }
-      } else {
-        console.warn("Not in Tauri, cannot hide window");
       }
     } else if (
       !isSearchVisible &&
@@ -400,13 +399,12 @@ function App() {
     }
   };
 
-  // Attach global listener for when input is not focused
   useEffect(() => {
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, []); // Run once
+  }, []);
 
   useEffect(() => {
     if (showSettings) {
@@ -480,7 +478,6 @@ function App() {
         }
       }}
     >
-      {/* Left Star (only if favorited) */}
       {item.is_favorite && (
         <StarIcon 
           filled={true} 
@@ -511,7 +508,6 @@ function App() {
         )}
       </div>
 
-      {/* Right Star (only if NOT favorited) */}
       {!item.is_favorite && (
         <StarIcon 
           filled={false} 
@@ -641,7 +637,6 @@ function App() {
               (searchQuery || showFavorites) ? (
                 filteredItems.map((result, index) => renderItem(result.item, index))
               ) : (
-                // Even in single item view, we use renderItem to show stars
                 renderItem(filteredItems[selectedIndex]?.item, selectedIndex)
               )
             ) : (
