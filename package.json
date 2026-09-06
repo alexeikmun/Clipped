@@ -12,13 +12,11 @@
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
-    "@tauri-apps/plugin-opener": "^2.5.5",
-    "prismjs": "^1.30.0"
+    "@tauri-apps/plugin-opener": "^2.5.5"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",
     "@tauri-apps/cli-linux-x64-gnu": "^2.11.4",
-    "@types/prismjs": "^1.26.6",
     "typescript": "~7.0.2",
     "vite": "^8.2.2"
   }

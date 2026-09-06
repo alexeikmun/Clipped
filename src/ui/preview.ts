@@ -1,9 +1,14 @@
-import Prism from 'prismjs';
-import 'prismjs/components/prism-json';
-import 'prismjs/components/prism-bash';
-import 'prismjs/components/prism-typescript';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { copyIconSvg, checkmarkIconSvg, imageFallbackIconSvg } from './icons';
+import { 
+  escapeHtml, 
+  detectType, 
+  tokenizeJson, 
+  tokenizeShell, 
+  tokenizeCode 
+} from './tokenizer';
+
+export { escapeHtml, detectType };
 
 export interface ClipItem {
   id: string;
@@ -15,15 +20,6 @@ export interface ClipItem {
   image_height?: number;
   ocr_text?: string;
   full_text_len?: number;
-}
-
-export function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
 }
 
 export function escapeRegExp(string: string): string {
@@ -46,91 +42,21 @@ export function highlightText(text: string, query: string): string {
   });
 }
 
-export const detectType = (text: string): 'json' | 'shell' | 'code' | 'text' => {
-  const trimmed = text.trim();
-
-  // JSON Detection
-  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try {
-      JSON.parse(trimmed);
-      return 'json';
-    } catch {
-      // Not valid JSON
-    }
-  }
-
-  // Shell Command Detection
-  const shellPatterns = [
-    /^sudo\s/, /^npm\s/, /^git\s/, /^docker\s/, /^cargo\s/, /^pnpm\s/, /^yarn\s/,
-    /^cd\s/, /^ls\s/, /^echo\s/, /^cat\s/, /^grep\s/, /^ssh\s/, /^\$\s/,
-    /^curl\s/, /^wget\s/, /^rm\s/, /^mv\s/, /^cp\s/, /^mkdir\s/, /^touch\s/,
-    /^ps\s/, /^kill\s/, /^top\s/, /^htop\s/, /^chmod\s/, /^chown\s/, /^tar\s/,
-    /^zip\s/, /^unzip\s/, /^brew\s/, /^apt\s/, /^apt-get\s/, /^yum\s/, /^dnf\s/,
-    /^pacman\s/, /^systemctl\s/, /^journalctl\s/
-  ];
-
-  if (shellPatterns.some(p => p.test(trimmed))) {
-    return 'shell';
-  }
-
-  // Code Detection
-  const codeKeywords = [
-    'function', 'const', 'let', 'var', 'import', 'export', 'class', 'interface', 
-    'return', 'if', 'else', 'for', 'while', 'switch', 'case', 'break', 'continue',
-    'try', 'catch', 'finally', 'throw', 'new', 'this', 'super', 'extends', 'implements',
-    'public', 'private', 'protected', 'static', 'void', 'null', 'true', 'false',
-    'def', 'async', 'await', 'package', 'namespace', 'using', 'include', '#include', '#define'
-  ];
-
-  const words = trimmed.split(/[\s(){}[\];.,<>:"'+=/-]+/);
-  const keywordCount = words.filter(w => codeKeywords.includes(w)).length;
-
-  const hasBraces = trimmed.includes('{') && trimmed.includes('}');
-  const hasSemicolons = trimmed.includes(';');
-  const hasArrows = trimmed.includes('=>') || trimmed.includes('->');
-  const hasParens = trimmed.includes('(') && trimmed.includes(')');
-
-  if (keywordCount > 1 || (keywordCount > 0 && (hasBraces || hasSemicolons || hasArrows || hasParens))) {
-    return 'code';
-  }
-
-  if (/^[a-zA-Z_$][a-zA-Z0-9_$]*\s*\(.*\)\s*;?$/.test(trimmed)) return 'code';
-  if (/^(const|let|var)\s+[a-zA-Z_$][a-zA-Z0-9_$]*\s*=/.test(trimmed)) return 'code';
-
-  return 'text';
-};
-
 export function renderTextPreview(text: string, query: string): string {
   const type = detectType(text);
 
-  if (type === 'json' && Prism.languages.json) {
-    try {
-      const highlighted = Prism.highlight(text, Prism.languages.json, 'json');
-      return injectQueryHighlight(highlighted, query);
-    } catch {
-      return highlightText(text, query);
-    }
+  let highlightedHtml: string;
+  if (type === 'json') {
+    highlightedHtml = tokenizeJson(text);
+  } else if (type === 'shell') {
+    highlightedHtml = tokenizeShell(text);
+  } else if (type === 'code') {
+    highlightedHtml = tokenizeCode(text);
+  } else {
+    highlightedHtml = escapeHtml(text);
   }
 
-  if (type === 'shell' && Prism.languages.bash) {
-    try {
-      const highlighted = Prism.highlight(text, Prism.languages.bash, 'bash');
-      return injectQueryHighlight(highlighted, query);
-    } catch {
-      return highlightText(text, query);
-    }
-  }
-
-  if (type === 'code' && Prism.languages.typescript) {
-    try {
-      const highlighted = Prism.highlight(text, Prism.languages.typescript, 'typescript');
-      return injectQueryHighlight(highlighted, query);
-    } catch {
-      return highlightText(text, query);
-    }
-  }
-
-  return highlightText(text, query);
+  return injectQueryHighlight(highlightedHtml, query);
 }
 
 // Injects search highlights into pre-highlighted HTML without breaking HTML tags
