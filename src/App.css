@@ -182,16 +182,25 @@ body {
 }
 
 .list-item {
-  padding: 8px 12px;
   border-radius: 8px;
   cursor: pointer;
   margin-bottom: 4px;
   transition: background-color 0.2s;
   text-align: left;
   display: flex;
-  align-items: center;
   position: relative;
-  padding-right: 56px; /* Make space for absolute positioned action icons */
+  box-sizing: border-box;
+}
+
+.list-item.compact,
+.list-item.single-card {
+  padding: 8px 12px;
+  align-items: center;
+}
+
+.list-item.single-card {
+  margin-bottom: 0;
+  cursor: default;
 }
 
 .item-text {
@@ -221,15 +230,53 @@ body {
   border-left: 3px solid #fbbf24;
 }
 
-.item-actions {
+/* Bottom-center floating action pill in single-card mode - viewport pinned & hover only */
+.card-actions-dock {
   position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
   display: flex;
   align-items: center;
-  gap: 6px;
-  z-index: 2;
+  gap: 8px;
+  padding: 5px 14px;
+  border-radius: 9999px;
+  background: rgba(18, 18, 30, 0.75);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  z-index: 50;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.card-actions-dock:empty {
+  display: none;
+}
+
+#content-mount:hover ~ .card-actions-dock,
+.card-actions-dock:hover {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.card-actions-dock:hover {
+  background: rgba(22, 22, 36, 0.88);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+  transform: translateX(-50%) translateY(-2px);
+}
+
+
+
+.action-divider {
+  width: 1px;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.15);
+  margin: 0 1px;
 }
 
 .action-icon {
@@ -240,36 +287,46 @@ body {
   padding: 3px;
   border-radius: 4px;
   transition: opacity 0.2s, color 0.2s, transform 0.1s;
+  color: #9ca3af;
 }
 
 .action-icon:hover {
-  transform: scale(1.1);
+  transform: scale(1.15);
 }
 
 .trash-icon {
   color: #9ca3af;
-  opacity: 0;
 }
 
-.list-item:hover .trash-icon {
-  opacity: 1;
+.card-actions-dock .trash-icon,
+.item-actions .trash-icon {
+  opacity: 0.85;
 }
 
+.card-actions-dock .trash-icon:hover,
 .trash-icon:hover {
+  opacity: 1;
   color: #f87171;
 }
 
 .star-icon {
-  color: #fbbf24;
-  opacity: 0;
+  color: #9ca3af;
+}
+
+.card-actions-dock .star-icon,
+.item-actions .star-icon {
+  opacity: 0.85;
 }
 
 .star-icon.favorited {
+  color: #fbbf24;
   opacity: 1;
 }
 
-.list-item:hover .star-icon {
+.card-actions-dock .star-icon:hover,
+.star-icon:hover {
   opacity: 1;
+  color: #fbbf24;
 }
 
 .highlight {
@@ -329,14 +386,31 @@ body {
 }
 
 .preview-image-wrapper {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.25);
-  border-radius: 8px;
-  padding: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 12px;
+  padding: 12px;
   max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
   flex-shrink: 0;
+}
+
+.preview-image-ambient-blur {
+  position: absolute;
+  inset: -30px;
+  background-size: cover;
+  background-position: center;
+  filter: blur(28px) brightness(0.45) saturate(160%);
+  opacity: 0.75;
+  pointer-events: none;
+  z-index: 0;
+  transform: scale(1.2);
 }
 
 .preview-image-wrapper.compact {
@@ -353,11 +427,14 @@ body {
 }
 
 .preview-image {
+  position: relative;
+  z-index: 1;
   max-width: 100%;
-  max-height: 200px;
+  max-height: 180px;
   object-fit: contain;
-  border-radius: 6px;
+  border-radius: 8px;
   display: block;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
 }
 
 .preview-image.compact {
@@ -367,6 +444,7 @@ body {
   max-height: 100%;
   object-fit: cover;
   border-radius: 4px;
+  box-shadow: none;
 }
 
 .clip-image-details {
@@ -507,4 +585,62 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   box-sizing: border-box;
+}
+
+/* Prism Syntax Highlighting (VSCode Dark+) */
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: #6a9955;
+  font-style: italic;
+}
+
+.token.punctuation {
+  color: #d4d4d4;
+}
+
+.token.property,
+.token.tag,
+.token.constant,
+.token.symbol,
+.token.deleted {
+  color: #9cdcfe;
+}
+
+.token.boolean,
+.token.number {
+  color: #b5cea8;
+}
+
+.token.selector,
+.token.attr-name,
+.token.string,
+.token.char,
+.token.builtin,
+.token.inserted {
+  color: #ce9178;
+}
+
+.token.operator,
+.token.entity,
+.token.url {
+  color: #d4d4d4;
+}
+
+.token.atrule,
+.token.attr-value,
+.token.keyword {
+  color: #569cd6;
+}
+
+.token.function,
+.token.class-name {
+  color: #dcdcaa;
+}
+
+.token.regex,
+.token.important,
+.token.variable {
+  color: #d16969;
 }
