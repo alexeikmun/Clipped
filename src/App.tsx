@@ -3,11 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 import { ContentPreview } from "./components/ContentPreview";
+import { ImagePreview } from "./components/ImagePreview";
 
 interface ClipItem {
   id: string;
   text: string;
   is_favorite: boolean;
+  clip_type?: "text" | "image";
+  image_path?: string;
+  image_width?: number;
+  image_height?: number;
 }
 
 interface SearchResult {
@@ -305,7 +310,7 @@ function App() {
       const item = filteredItems[selectedIndex]?.item;
       if (item) {
         if ("__TAURI_INTERNALS__" in window) {
-          await invoke("paste_item", { text: item.text });
+          await invoke("paste_item", { text: item.text, id: item.id });
         } else {
           console.log("Mock paste:", item.text);
         }
@@ -496,7 +501,17 @@ function App() {
       )}
 
       <div className="item-text">
-        <ContentPreview text={item.text} query={searchQuery} />
+        {item.clip_type === "image" ? (
+          <ImagePreview
+            imagePath={item.image_path}
+            width={item.image_width}
+            height={item.image_height}
+            text={item.text}
+            isCompact={isSearchVisible}
+          />
+        ) : (
+          <ContentPreview text={item.text} query={searchQuery} />
+        )}
       </div>
 
       {/* Right Star (only if NOT favorited) */}
