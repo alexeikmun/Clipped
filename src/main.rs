@@ -6,6 +6,7 @@ mod db;
 mod model;
 mod ocr;
 mod paste;
+mod syntax;
 mod ui;
 
 fn main() -> windows::core::Result<()> {
@@ -61,16 +62,17 @@ fn main() -> windows::core::Result<()> {
                 ocr_text: None,
                 full_text_len: sample_json.len(),
             };
+            let sample_code = "fn handle_paste(id: &str) -> Result<bool> {\n    // Auto-paste into active window\n    let item = db.get_clip(id)?;\n    enigo.key_sequence(\"paste\");\n    Ok(true)\n}";
             let item2 = db::ClipItem {
                 id: "2".into(),
-                text: "Starred clip with yellow border".into(),
+                text: sample_code.into(),
                 is_favorite: true,
                 clip_type: "text".into(),
                 image_path: None,
                 image_width: None,
                 image_height: None,
                 ocr_text: None,
-                full_text_len: 32,
+                full_text_len: sample_code.len(),
             };
             ui.set_clips(vec![item1, item2], Some(1));
             if let Err(_e) = d2d.export_ui_to_png(&mut ui, model::WINDOW_WIDTH as u32, model::WINDOW_HEIGHT as u32, std::path::Path::new(path_str)) {

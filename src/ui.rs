@@ -426,17 +426,24 @@ impl UiState {
                 right: card_x + card_w - 14.0,
                 bottom: card_y + card_h - 26.0,
             };
-            d2d.draw_text(&item.text, &formats.card_text, &text_rect, &brushes.text_primary);
+            d2d.draw_syntax_highlighted_text(&item.text, &formats.card_text, &text_rect, &brushes.text_primary);
             d2d.pop_clip();
 
-            // Metadata footer (character count & type)
+            // Metadata footer (language tag, character count & lines)
             let len = item.text.chars().count();
             let lines = item.text.lines().count();
-            let meta_text = format!("{} chars • {} line{}", len, lines, if lines == 1 { "" } else { "s" });
+            let lang = crate::syntax::detect_language(&item.text);
+            let lang_label = match lang {
+                crate::syntax::Language::Json => "JSON",
+                crate::syntax::Language::Shell => "SHELL",
+                crate::syntax::Language::Code => "CODE",
+                crate::syntax::Language::Text => "TEXT",
+            };
+            let meta_text = format!("{} • {} chars • {} line{}", lang_label, len, lines, if lines == 1 { "" } else { "s" });
             let meta_rect = D2D_RECT_F {
                 left: card_x + 14.0,
                 top: card_y + card_h - 22.0,
-                right: card_x + 220.0,
+                right: card_x + 260.0,
                 bottom: card_y + card_h - 6.0,
             };
             d2d.draw_text(&meta_text, &formats.small, &meta_rect, &brushes.text_muted);

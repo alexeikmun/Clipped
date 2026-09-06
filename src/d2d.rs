@@ -34,6 +34,52 @@ pub struct Brushes {
     pub search_border: ID2D1SolidColorBrush,
     pub pill_bg: ID2D1SolidColorBrush,
     pub scroll_thumb: ID2D1SolidColorBrush,
+    pub syn_keyword: ID2D1SolidColorBrush,
+    pub syn_string: ID2D1SolidColorBrush,
+    pub syn_number: ID2D1SolidColorBrush,
+    pub syn_comment: ID2D1SolidColorBrush,
+    pub syn_type: ID2D1SolidColorBrush,
+    pub syn_function: ID2D1SolidColorBrush,
+    pub syn_property: ID2D1SolidColorBrush,
+}
+
+impl Brushes {
+    pub fn new(target: &ID2D1RenderTarget) -> windows::core::Result<Self> {
+        unsafe {
+            Ok(Self {
+                bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 24.0 / 255.0, g: 24.0 / 255.0, b: 37.0 / 255.0, a: 1.0 }, None)?,
+                card: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 30.0 / 255.0, g: 30.0 / 255.0, b: 46.0 / 255.0, a: 1.0 }, None)?,
+                card_hover: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 38.0 / 255.0, g: 38.0 / 255.0, b: 58.0 / 255.0, a: 1.0 }, None)?,
+                card_selected: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 49.0 / 255.0, g: 50.0 / 255.0, b: 68.0 / 255.0, a: 1.0 }, None)?,
+                accent: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 255.0 / 255.0, a: 1.0 }, None)?,
+                favorite: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 1.0 }, None)?,
+                favorite_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 0.15 }, None)?,
+                favorite_selected_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 0.22 }, None)?,
+                border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 }, None)?,
+                border_subtle: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.04 }, None)?,
+                text_primary: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 241.0 / 255.0, g: 245.0 / 255.0, b: 249.0 / 255.0, a: 1.0 }, None)?,
+                text_secondary: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 203.0 / 255.0, g: 213.0 / 255.0, b: 225.0 / 255.0, a: 1.0 }, None)?,
+                text_muted: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 108.0 / 255.0, g: 112.0 / 255.0, b: 134.0 / 255.0, a: 1.0 }, None)?,
+                badge_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.35 }, None)?,
+                dock_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 20.0 / 255.0, g: 20.0 / 255.0, b: 34.0 / 255.0, a: 0.95 }, None)?,
+                dock_border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.15 }, None)?,
+                trash: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 1.0 }, None)?,
+                trash_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 0.15 }, None)?,
+                highlight: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 255.0 / 255.0, a: 0.35 }, None)?,
+                search_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.30 }, None)?,
+                search_border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.15 }, None)?,
+                pill_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.30 }, None)?,
+                scroll_thumb: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.20 }, None)?,
+                syn_keyword: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 203.0 / 255.0, g: 166.0 / 255.0, b: 247.0 / 255.0, a: 1.0 }, None)?,
+                syn_string: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 166.0 / 255.0, g: 227.0 / 255.0, b: 161.0 / 255.0, a: 1.0 }, None)?,
+                syn_number: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 250.0 / 255.0, g: 179.0 / 255.0, b: 135.0 / 255.0, a: 1.0 }, None)?,
+                syn_comment: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 127.0 / 255.0, g: 132.0 / 255.0, b: 156.0 / 255.0, a: 1.0 }, None)?,
+                syn_type: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 137.0 / 255.0, g: 220.0 / 255.0, b: 235.0 / 255.0, a: 1.0 }, None)?,
+                syn_function: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 249.0 / 255.0, g: 226.0 / 255.0, b: 175.0 / 255.0, a: 1.0 }, None)?,
+                syn_property: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 137.0 / 255.0, g: 180.0 / 255.0, b: 250.0 / 255.0, a: 1.0 }, None)?,
+            })
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -237,31 +283,7 @@ impl D2dContext {
             target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
 
-            let brushes = Brushes {
-                bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 24.0 / 255.0, g: 24.0 / 255.0, b: 37.0 / 255.0, a: 1.0 }, None)?,
-                card: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 30.0 / 255.0, g: 30.0 / 255.0, b: 46.0 / 255.0, a: 1.0 }, None)?,
-                card_hover: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 38.0 / 255.0, g: 38.0 / 255.0, b: 58.0 / 255.0, a: 1.0 }, None)?,
-                card_selected: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 49.0 / 255.0, g: 50.0 / 255.0, b: 68.0 / 255.0, a: 1.0 }, None)?,
-                accent: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 255.0 / 255.0, a: 1.0 }, None)?,
-                favorite: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 1.0 }, None)?,
-                favorite_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 0.15 }, None)?,
-                favorite_selected_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 0.22 }, None)?,
-                border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 }, None)?,
-                border_subtle: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.04 }, None)?,
-                text_primary: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 241.0 / 255.0, g: 245.0 / 255.0, b: 249.0 / 255.0, a: 1.0 }, None)?,
-                text_secondary: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 203.0 / 255.0, g: 213.0 / 255.0, b: 225.0 / 255.0, a: 1.0 }, None)?,
-                text_muted: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 108.0 / 255.0, g: 112.0 / 255.0, b: 134.0 / 255.0, a: 1.0 }, None)?,
-                badge_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.35 }, None)?,
-                dock_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 20.0 / 255.0, g: 20.0 / 255.0, b: 34.0 / 255.0, a: 0.95 }, None)?,
-                dock_border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.15 }, None)?,
-                trash: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 1.0 }, None)?,
-                trash_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 0.15 }, None)?,
-                highlight: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 255.0 / 255.0, a: 0.35 }, None)?,
-                search_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.30 }, None)?,
-                search_border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.15 }, None)?,
-                pill_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.30 }, None)?,
-                scroll_thumb: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.20 }, None)?,
-            };
+            let brushes = Brushes::new(&target)?;
 
             self.hwnd_target = Some(hwnd_target);
             self.render_target = Some(target);
@@ -796,6 +818,66 @@ impl D2dContext {
         }
     }
 
+    pub fn draw_syntax_highlighted_text(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: &D2D_RECT_F,
+        default_brush: &ID2D1SolidColorBrush,
+    ) {
+        if let Some(ref target) = self.render_target {
+            let utf16: Vec<u16> = text.encode_utf16().collect();
+            let w = rect.right - rect.left;
+            let h = rect.bottom - rect.top;
+            if w <= 0.0 || h <= 0.0 {
+                return;
+            }
+            unsafe {
+                if let Ok(layout) = self.dwrite_factory.CreateTextLayout(&utf16, format, w, h) {
+                    if let Some(ref brushes) = self.brushes {
+                        let tokens = crate::syntax::tokenize(text);
+                        for token in tokens {
+                            if token.start_u16 + token.length_u16 <= utf16.len() as u32 {
+                                let range = DWRITE_TEXT_RANGE {
+                                    startPosition: token.start_u16,
+                                    length: token.length_u16,
+                                };
+                                let brush = match token.kind {
+                                    crate::syntax::TokenKind::Keyword => &brushes.syn_keyword,
+                                    crate::syntax::TokenKind::String => &brushes.syn_string,
+                                    crate::syntax::TokenKind::Number => &brushes.syn_number,
+                                    crate::syntax::TokenKind::Comment => &brushes.syn_comment,
+                                    crate::syntax::TokenKind::Type => &brushes.syn_type,
+                                    crate::syntax::TokenKind::Function => &brushes.syn_function,
+                                    crate::syntax::TokenKind::Property => &brushes.syn_property,
+                                };
+                                let _ = layout.SetDrawingEffect(brush, range);
+                            }
+                        }
+                    }
+                    target.DrawTextLayout(
+                        D2D_POINT_2F {
+                            x: rect.left,
+                            y: rect.top,
+                        },
+                        &layout,
+                        default_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    );
+                    return;
+                }
+                target.DrawText(
+                    &utf16,
+                    format,
+                    rect,
+                    default_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+        }
+    }
+
     pub fn export_ui_to_png(
         &mut self,
         ui: &mut crate::ui::UiState,
@@ -859,31 +941,7 @@ impl D2dContext {
             let prev_target = self.render_target.take();
             let prev_brushes = self.brushes.take();
 
-            let brushes = Brushes {
-                bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 24.0 / 255.0, g: 24.0 / 255.0, b: 37.0 / 255.0, a: 1.0 }, None)?,
-                card: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 30.0 / 255.0, g: 30.0 / 255.0, b: 46.0 / 255.0, a: 1.0 }, None)?,
-                card_hover: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 38.0 / 255.0, g: 38.0 / 255.0, b: 58.0 / 255.0, a: 1.0 }, None)?,
-                card_selected: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 49.0 / 255.0, g: 50.0 / 255.0, b: 68.0 / 255.0, a: 1.0 }, None)?,
-                accent: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 255.0 / 255.0, a: 1.0 }, None)?,
-                favorite: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 1.0 }, None)?,
-                favorite_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 0.15 }, None)?,
-                favorite_selected_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 0.22 }, None)?,
-                border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 }, None)?,
-                border_subtle: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.04 }, None)?,
-                text_primary: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 241.0 / 255.0, g: 245.0 / 255.0, b: 249.0 / 255.0, a: 1.0 }, None)?,
-                text_secondary: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 203.0 / 255.0, g: 213.0 / 255.0, b: 225.0 / 255.0, a: 1.0 }, None)?,
-                text_muted: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 108.0 / 255.0, g: 112.0 / 255.0, b: 134.0 / 255.0, a: 1.0 }, None)?,
-                badge_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.35 }, None)?,
-                dock_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 20.0 / 255.0, g: 20.0 / 255.0, b: 34.0 / 255.0, a: 0.95 }, None)?,
-                dock_border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.14 }, None)?,
-                trash: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 1.0 }, None)?,
-                trash_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 0.15 }, None)?,
-                highlight: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 255.0 / 255.0, a: 0.35 }, None)?,
-                search_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.30 }, None)?,
-                search_border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.12 }, None)?,
-                pill_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.30 }, None)?,
-                scroll_thumb: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.20 }, None)?,
-            };
+            let brushes = Brushes::new(&target)?;
 
             self.render_target = Some(target.clone());
             self.brushes = Some(brushes);
