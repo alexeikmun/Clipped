@@ -134,6 +134,8 @@ enum ClipboardEvent {
 
 #[cfg(target_os = "windows")]
 static CACHED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+#[cfg(target_os = "windows")]
+static PREVIOUS_FOREGROUND_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 #[cfg(target_os = "windows")]
 fn center_and_focus_window(window: &MainWindow) {
@@ -144,11 +146,12 @@ fn center_and_focus_window(window: &MainWindow) {
         SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
         SWP_SHOWWINDOW, WS_EX_TOOLWINDOW,
     };
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let win_w = 480;
-    let win_h = 360;
+    let win_w = 580;
+    let win_h = 380;
     let x = (screen_w - win_w) / 2;
     let y = (screen_h - win_h) / 2;
 
@@ -202,6 +205,7 @@ fn center_and_focus_window(window: &MainWindow) {
 
             let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, win_w, win_h, SWP_SHOWWINDOW);
             let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(hwnd);
         }
     }
 }
@@ -284,13 +288,48 @@ fn perform_paste(item: &ClipItem, data_dir: &Path, is_monitoring: &AtomicBool) {
         let _ = clipboard.set_text(paste_text);
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        let prev = PREVIOUS_FOREGROUND_HWND.load(Ordering::Relaxed);
+        if prev != 0 {
+            unsafe {
+                let target = HWND(prev as _);
+                let _ = SetForegroundWindow(target);
+            }
+        }
+    }
+
     thread::sleep(Duration::from_millis(100));
 
-    if let Ok(mut enigo) = enigo::Enigo::new(&enigo::Settings::default()) {
-        use enigo::{Direction, Key, Keyboard};
-        let _ = enigo.key(Key::Control, Direction::Press);
-        let _ = enigo.key(Key::Unicode('v'), Direction::Click);
-        let _ = enigo.key(Key::Control, Direction::Release);
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            keybd_event, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU, VK_SHIFT, VK_V,
+        };
+        unsafe {
+            // Release modifier keys that might have been held when opening via hotkey
+            keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+            keybd_event(VK_SHIFT.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+            keybd_event(VK_CONTROL.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+
+            // Send Ctrl+V
+            keybd_event(VK_CONTROL.0 as u8, 0, Default::default(), 0);
+            keybd_event(VK_V.0 as u8, 0, Default::default(), 0);
+            keybd_event(VK_V.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+            keybd_event(VK_CONTROL.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(mut enigo) = enigo::Enigo::new(&enigo::Settings::default()) {
+            use enigo::{Direction, Key, Keyboard};
+            let _ = enigo.key(Key::Control, Direction::Press);
+            let _ = enigo.key(Key::Unicode('v'), Direction::Click);
+            let _ = enigo.key(Key::Control, Direction::Release);
+        }
     }
 
     thread::sleep(Duration::from_millis(200));
@@ -397,6 +436,7 @@ fn main() {
     if show_on_startup {
         is_monitoring.store(false, Ordering::Relaxed);
         center_and_focus_window(&main_window);
+        main_window.invoke_focus_main();
     }
 
     // 5. Global HotKey Manager
@@ -703,6 +743,7 @@ fn main() {
                 let show_fav = w.get_show_favorites();
                 let updated = reload_clips(&w, &db_c, &data_dir_c, show_fav, "", Some(0));
                 *cached_clips_c.lock().unwrap() = updated;
+                w.invoke_focus_main();
             }
         });
     }
@@ -747,6 +788,7 @@ fn main() {
         main_window.on_close_settings(move || {
             if let Some(w) = window_weak.upgrade() {
                 w.set_show_settings(false);
+                w.invoke_focus_main();
             }
         });
     }
@@ -813,6 +855,16 @@ fn main() {
                         refresh_active_image(&w, &clips, next_idx as usize, &data_dir_timer);
                     }
                 } else {
+                    #[cfg(target_os = "windows")]
+                    {
+                        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                        let fg = unsafe { GetForegroundWindow() };
+                        let cached = CACHED_HWND.load(Ordering::Relaxed);
+                        if !fg.0.is_null() && fg.0 as isize != cached {
+                            PREVIOUS_FOREGROUND_HWND.store(fg.0 as isize, Ordering::Relaxed);
+                        }
+                    }
+
                     // Modal opened: reload history, center, show, focus
                     is_monitoring_timer.store(false, Ordering::Relaxed);
                     w.set_show_settings(false);
@@ -824,6 +876,7 @@ fn main() {
                     *cached_clips_timer.lock().unwrap() = updated;
 
                     center_and_focus_window(&w);
+                    w.invoke_focus_main();
                     ignore_blur_counter = 12; // Give window ~480ms to gain focus before checking blur
                 }
             }
@@ -832,9 +885,20 @@ fn main() {
         // B. Drain Tray Icon Events
         while let Ok(tray_event) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Down, .. } = tray_event {
+                #[cfg(target_os = "windows")]
+                {
+                    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+                    let fg = unsafe { GetForegroundWindow() };
+                    let cached = CACHED_HWND.load(Ordering::Relaxed);
+                    if !fg.0.is_null() && fg.0 as isize != cached {
+                        PREVIOUS_FOREGROUND_HWND.store(fg.0 as isize, Ordering::Relaxed);
+                    }
+                }
+
                 is_monitoring_timer.store(false, Ordering::Relaxed);
                 w.set_show_settings(true);
                 center_and_focus_window(&w);
+                w.invoke_focus_main();
                 ignore_blur_counter = 12;
             }
         }

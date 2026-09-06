@@ -16,8 +16,8 @@ export component MainWindow inherits Window {
     title: "Clipped";
     no-frame: true;
     background: transparent;
-    preferred-width: 480px;
-    preferred-height: 360px;
+    preferred-width: 580px;
+    preferred-height: 380px;
     default-font-family: "Segoe UI, -apple-system, system-ui, sans-serif";
 
     in-out property <[ClipData]> clips: [];
@@ -43,9 +43,17 @@ export component MainWindow inherits Window {
     callback close_settings();
     callback set_shortcut_input(string);
 
+    public function focus_main() {
+        main-scope.focus();
+    }
+
     forward-focus: main-scope;
 
     main-scope := FocusScope {
+        init => {
+            self.focus();
+        }
+
         key-pressed(event) => {
             if (event.text == Key.Escape) {
                 if (root.show_settings) {
@@ -72,20 +80,22 @@ export component MainWindow inherits Window {
             if (event.text == Key.UpArrow || event.text == Key.LeftArrow) {
                 if (root.clips.length > 0) {
                     if (root.selected_index > 0) {
-                        root.select_index(root.selected_index - 1);
+                        root.selected_index -= 1;
                     } else {
-                        root.select_index(root.clips.length - 1);
+                        root.selected_index = root.clips.length - 1;
                     }
+                    root.select_index(root.selected_index);
                 }
                 return accept;
             }
             if (event.text == Key.DownArrow || event.text == Key.RightArrow || event.text == Key.Tab) {
                 if (root.clips.length > 0) {
                     if (root.selected_index < root.clips.length - 1) {
-                        root.select_index(root.selected_index + 1);
+                        root.selected_index += 1;
                     } else {
-                        root.select_index(0);
+                        root.selected_index = 0;
                     }
+                    root.select_index(root.selected_index);
                 }
                 return accept;
             }
@@ -191,6 +201,7 @@ export component MainWindow inherits Window {
                         fav_touch := TouchArea {
                             clicked => {
                                 root.toggle_favorites_filter();
+                                main-scope.focus();
                             }
                         }
                     }
@@ -219,6 +230,7 @@ export component MainWindow inherits Window {
                             key-pressed(event) => {
                                 if (event.text == Key.Escape) {
                                     root.search_closed();
+                                    main-scope.focus();
                                     return accept;
                                 }
                                 if (event.text == Key.Return) {
@@ -228,20 +240,22 @@ export component MainWindow inherits Window {
                                 if (event.text == Key.UpArrow) {
                                     if (root.clips.length > 0) {
                                         if (root.selected_index > 0) {
-                                            root.select_index(root.selected_index - 1);
+                                            root.selected_index -= 1;
                                         } else {
-                                            root.select_index(root.clips.length - 1);
+                                            root.selected_index = root.clips.length - 1;
                                         }
+                                        root.select_index(root.selected_index);
                                     }
                                     return accept;
                                 }
                                 if (event.text == Key.DownArrow) {
                                     if (root.clips.length > 0) {
                                         if (root.selected_index < root.clips.length - 1) {
-                                            root.select_index(root.selected_index + 1);
+                                            root.selected_index += 1;
                                         } else {
-                                            root.select_index(0);
+                                            root.selected_index = 0;
                                         }
+                                        root.select_index(root.selected_index);
                                     }
                                     return accept;
                                 }
@@ -258,7 +272,9 @@ export component MainWindow inherits Window {
                     clip: true;
 
                     content_touch := TouchArea {
-                        // Captures hover over the content viewport to reveal action dock
+                        clicked => {
+                            main-scope.focus();
+                        }
                     }
 
                     // 1. Settings View
@@ -455,6 +471,7 @@ export component MainWindow inherits Window {
                                 item_touch := TouchArea {
                                     clicked => {
                                         root.select_index(idx);
+                                        main-scope.focus();
                                     }
                                 }
 
@@ -524,6 +541,7 @@ export component MainWindow inherits Window {
                             clicked => {
                                 if (root.clips.length > 0 && root.selected_index >= 0 && root.selected_index < root.clips.length) {
                                     root.delete_clip(root.clips[root.selected_index].id);
+                                    main-scope.focus();
                                 }
                             }
                         }
@@ -556,6 +574,7 @@ export component MainWindow inherits Window {
                             clicked => {
                                 if (root.clips.length > 0 && root.selected_index >= 0 && root.selected_index < root.clips.length) {
                                     root.toggle_favorite(root.clips[root.selected_index].id);
+                                    main-scope.focus();
                                 }
                             }
                         }
