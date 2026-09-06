@@ -3,7 +3,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::thread;
 use std::time::Duration;
 use std::fs;
@@ -32,28 +32,28 @@ pub struct AppSettings {
 
 struct AppState {
     is_monitoring: AtomicBool,
-    history: Mutex<Vec<ClipItem>>,
+    history: RwLock<Vec<ClipItem>>,
     data_dir: PathBuf,
-    settings: Mutex<AppSettings>,
+    settings: RwLock<AppSettings>,
 }
 
 fn load_history(data_dir: &Path) -> Vec<ClipItem> {
     let history_path = data_dir.join(HISTORY_FILE);
-    if history_path.exists() {
-        if let Ok(content) = fs::read_to_string(history_path) {
-            // Try to parse as new format
-            if let Ok(history) = serde_json::from_str::<Vec<ClipItem>>(&content) {
-                return history;
-            }
-            // Fallback: try to parse as old format (Vec<String>) and migrate
-            if let Ok(old_history) = serde_json::from_str::<Vec<String>>(&content) {
-                return old_history.into_iter().map(|text| ClipItem {
-                    id: Uuid::new_v4().to_string(),
-                    text,
-                    is_favorite: false,
-                }).collect();
-            }
-        }
+    let Ok(content) = fs::read_to_string(&history_path) else {
+        return Vec::new();
+    };
+
+    // Try to parse as new format
+    if let Ok(history) = serde_json::from_str::<Vec<ClipItem>>(&content) {
+        return history;
+    }
+    // Fallback: try to parse as old format (Vec<String>) and migrate
+    if let Ok(old_history) = serde_json::from_str::<Vec<String>>(&content) {
+        return old_history.into_iter().map(|text| ClipItem {
+            id: Uuid::new_v4().to_string(),
+            text,
+            is_favorite: false,
+        }).collect();
     }
     Vec::new()
 }
@@ -95,13 +95,13 @@ fn set_monitoring(state: tauri::State<AppState>, monitoring: bool) {
 
 #[tauri::command]
 fn get_history(state: tauri::State<AppState>) -> Vec<ClipItem> {
-    let history = state.history.lock().unwrap();
+    let history = state.history.read().unwrap();
     history.clone()
 }
 
 #[tauri::command]
 fn toggle_favorite(state: tauri::State<AppState>, id: String) -> Result<Vec<ClipItem>, String> {
-    let mut history = state.history.lock().unwrap();
+    let mut history = state.history.write().unwrap();
     if let Some(item) = history.iter_mut().find(|item| item.id == id) {
         item.is_favorite = !item.is_favorite;
         save_history(&state.data_dir, &history);
@@ -147,7 +147,7 @@ fn hide_app(app: AppHandle, state: tauri::State<AppState>) {
 
 #[tauri::command]
 fn get_settings(state: tauri::State<AppState>) -> AppSettings {
-    let settings = state.settings.lock().unwrap();
+    let settings = state.settings.read().unwrap();
     settings.clone()
 }
 
@@ -159,7 +159,7 @@ fn set_shortcut(app: AppHandle, state: tauri::State<AppState>, shortcut: String)
     }
 
     let parsed = trimmed.parse::<Shortcut>().map_err(|e| e.to_string())?;
-    let mut settings = state.settings.lock().unwrap();
+    let mut settings = state.settings.write().unwrap();
     let current = settings.shortcut.clone();
     if current == trimmed {
         return Ok(current);
@@ -242,9 +242,9 @@ pub fn run() {
 
             let state = AppState {
                 is_monitoring: AtomicBool::new(true),
-                history: Mutex::new(history),
+                history: RwLock::new(history),
                 data_dir: data_dir.clone(),
-                settings: Mutex::new(settings.clone()),
+                settings: RwLock::new(settings.clone()),
             };
             app.manage(state);
 
@@ -293,49 +293,57 @@ pub fn run() {
             let app_handle_clone = app.handle().clone();
             thread::spawn(move || {
                 let mut last_text = String::new();
+                let mut clipboard_opt: Option<Clipboard> = Clipboard::new().ok();
                 loop {
                     let state = app_handle_clone.state::<AppState>();
                     if state.is_monitoring.load(Ordering::Relaxed) {
-                        if let Ok(mut clipboard) = Clipboard::new() {
-                            if let Ok(text) = clipboard.get_text() {
-                                let trimmed = text.trim();
-                                if !trimmed.is_empty() && text != last_text {
-                                    last_text = text.clone();
-                                    
-                                    // Update shared state and persist
-                                    if let Ok(mut history) = state.history.lock() {
-                                        // Check for duplicate at top
-                                        let is_duplicate = history.first().map(|item| item.text == text).unwrap_or(false);
+                        if clipboard_opt.is_none() {
+                            clipboard_opt = Clipboard::new().ok();
+                        }
+                        if let Some(ref mut clipboard) = clipboard_opt {
+                            match clipboard.get_text() {
+                                Ok(text) => {
+                                    let trimmed = text.trim();
+                                    if !trimmed.is_empty() && text != last_text {
+                                        last_text = text.clone();
                                         
-                                        if !is_duplicate {
-                                            let new_item = ClipItem {
-                                                id: Uuid::new_v4().to_string(),
-                                                text: text.clone(),
-                                                is_favorite: false,
-                                            };
+                                        // Update shared state and persist
+                                        if let Ok(mut history) = state.history.write() {
+                                            // Check for duplicate at top
+                                            let is_duplicate = history.first().map(|item| item.text == text).unwrap_or(false);
                                             
-                                            history.insert(0, new_item.clone());
-                                            
-                                            // Smart truncation: remove non-favorites from the bottom
-                                            while history.len() > MAX_HISTORY {
-                                                // Find the last index that is NOT a favorite
-                                                let last_non_fav_index = history.iter().rposition(|item| !item.is_favorite);
+                                            if !is_duplicate {
+                                                let new_item = ClipItem {
+                                                    id: Uuid::new_v4().to_string(),
+                                                    text: text.clone(),
+                                                    is_favorite: false,
+                                                };
                                                 
-                                                if let Some(index) = last_non_fav_index {
-                                                    history.remove(index);
-                                                } else {
-                                                    // All items are favorites, stop truncating?
-                                                    // Or force remove oldest?
-                                                    // Requirement: "Favorited items are excluded from clip rotation and cannot be automatically deleted."
-                                                    // So we break the loop even if > MAX_HISTORY
-                                                    break;
+                                                history.insert(0, new_item.clone());
+                                                
+                                                // Smart truncation: remove non-favorites from the bottom
+                                                while history.len() > MAX_HISTORY {
+                                                    // Find the last index that is NOT a favorite
+                                                    let last_non_fav_index = history.iter().rposition(|item| !item.is_favorite);
+                                                    
+                                                    if let Some(index) = last_non_fav_index {
+                                                        history.remove(index);
+                                                    } else {
+                                                        // All items are favorites, stop truncating?
+                                                        // Requirement: "Favorited items are excluded from clip rotation and cannot be automatically deleted."
+                                                        // So we break the loop even if > MAX_HISTORY
+                                                        break;
+                                                    }
                                                 }
+                                                
+                                                save_history(&state.data_dir, &history);
+                                                let _ = app_handle_clone.emit("clipboard-new", &new_item);
                                             }
-                                            
-                                            save_history(&state.data_dir, &history);
-                                            let _ = app_handle_clone.emit("clipboard-new", &new_item);
                                         }
                                     }
+                                }
+                                Err(_) => {
+                                    clipboard_opt = None;
                                 }
                             }
                         }
