@@ -133,8 +133,12 @@ enum ClipboardEvent {
 }
 
 #[cfg(target_os = "windows")]
+static CACHED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
 fn center_and_focus_window(window: &MainWindow) {
     use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         FindWindowW, GetSystemMetrics, GetWindowLongW, SetForegroundWindow,
         SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
@@ -152,8 +156,16 @@ fn center_and_focus_window(window: &MainWindow) {
     let _ = window.show();
 
     unsafe {
-        let title = HSTRING::from("Clipped");
-        if let Ok(hwnd) = FindWindowW(None, &title) {
+        let cached = CACHED_HWND.load(Ordering::Relaxed);
+        let hwnd = if cached != 0 {
+            HWND(cached as _)
+        } else {
+            let title = HSTRING::from("Clipped");
+            FindWindowW(None, &title).unwrap_or(HWND(std::ptr::null_mut()))
+        };
+
+        if !hwnd.0.is_null() {
+            CACHED_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
             let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_TOOLWINDOW.0 as i32);
             let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, win_w, win_h, SWP_SHOWWINDOW);
@@ -170,6 +182,7 @@ fn center_and_focus_window(window: &MainWindow) {
 #[cfg(target_os = "windows")]
 fn is_window_foreground() -> bool {
     use windows::core::HSTRING;
+    use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetForegroundWindow};
 
     unsafe {
@@ -177,8 +190,13 @@ fn is_window_foreground() -> bool {
         if fg.0.is_null() {
             return true;
         }
+        let cached = CACHED_HWND.load(Ordering::Relaxed);
+        if cached != 0 {
+            return fg.0 as isize == cached;
+        }
         let title = HSTRING::from("Clipped");
         if let Ok(hwnd) = FindWindowW(None, &title) {
+            CACHED_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
             return fg == hwnd;
         }
     }
@@ -745,7 +763,7 @@ fn main() {
     let data_dir_timer = data_dir.clone();
     let cached_clips_timer = cached_clips.clone();
     let is_monitoring_timer = is_monitoring.clone();
-    let mut ignore_blur_counter: u32 = 0;
+    let mut ignore_blur_counter: u32 = if show_on_startup { 12 } else { 0 };
 
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(40), move || {
         let Some(w) = window_weak.upgrade() else { return; };
@@ -775,7 +793,7 @@ fn main() {
                     *cached_clips_timer.lock().unwrap() = updated;
 
                     center_and_focus_window(&w);
-                    ignore_blur_counter = 5; // Give window ~200ms to gain focus before checking blur
+                    ignore_blur_counter = 12; // Give window ~480ms to gain focus before checking blur
                 }
             }
         }
@@ -786,13 +804,14 @@ fn main() {
                 is_monitoring_timer.store(false, Ordering::Relaxed);
                 w.set_show_settings(true);
                 center_and_focus_window(&w);
-                ignore_blur_counter = 5;
+                ignore_blur_counter = 12;
             }
         }
 
         // C. Drain Muda Menu Events (Exit)
         while let Ok(menu_event) = muda::MenuEvent::receiver().try_recv() {
             if menu_event.id() == &exit_id {
+                let _ = slint::quit_event_loop();
                 std::process::exit(0);
             }
         }
@@ -809,5 +828,6 @@ fn main() {
     });
 
     println!("Clipped (Pure Rust Native) running with Slint GUI!");
-    main_window.run().unwrap();
+    let _keep_alive = main_window;
+    slint::run_event_loop_until_quit().unwrap();
 }
