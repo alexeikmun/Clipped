@@ -370,28 +370,8 @@ pub fn run() {
                 while let Ok(event) = rx.recv() {
                     match event {
                         ClipboardEvent::Text(text) => {
-                            // Deduplicate against latest item
-                            if let Ok(Some(latest)) = db_worker.get_latest_item() {
-                                if latest.clip_type == "text" && latest.text == text {
-                                    continue;
-                                }
-                            }
-
-                            let id = Uuid::new_v4().to_string();
-                            let text_len = text.len();
-                            let item = ClipItem {
-                                id: id.clone(),
-                                text: text.clone(),
-                                is_favorite: false,
-                                clip_type: "text".to_string(),
-                                image_path: None,
-                                image_width: None,
-                                image_height: None,
-                                ocr_text: None,
-                                full_text_len: text_len,
-                            };
-
-                            if db_worker.insert_clip(&item).is_ok() {
+                            let hash = format!("{:016x}", xxh3_64(text.as_bytes()));
+                            if let Ok(item) = db_worker.save_or_bump_text(text, &hash) {
                                 if let Ok(deleted_images) = db_worker.prune_history(MAX_HISTORY) {
                                     for p in deleted_images {
                                         let path = Path::new(&p);
@@ -409,46 +389,53 @@ pub fn run() {
                             }
                         }
                         ClipboardEvent::Image { width, height, bytes } => {
-                            let uuid_str = Uuid::new_v4().to_string();
-                            let img_filename = format!("{}.png", uuid_str);
-                            let images_dir = data_dir_worker.join("images");
-                            if !images_dir.exists() {
-                                let _ = fs::create_dir_all(&images_dir);
-                            }
-                            let full_img_path = images_dir.join(&img_filename);
-                            let full_img_path_str = full_img_path.to_string_lossy().replace('\\', "/");
+                            let hash = format!("{:016x}", xxh3_64(&bytes));
+                            if let Ok(Some(existing_item)) = db_worker.find_image_by_hash(&hash) {
+                                // Image duplicate: bump to top
+                                let _ = db_worker.bump_clip_timestamp(&existing_item.id);
+                                let _ = app_worker.emit("clipboard-new", &existing_item);
+                            } else {
+                                let uuid_str = Uuid::new_v4().to_string();
+                                let img_filename = format!("{}.png", uuid_str);
+                                let images_dir = data_dir_worker.join("images");
+                                if !images_dir.exists() {
+                                    let _ = fs::create_dir_all(&images_dir);
+                                }
+                                let full_img_path = images_dir.join(&img_filename);
+                                let full_img_path_str = full_img_path.to_string_lossy().replace('\\', "/");
 
-                            if image::save_buffer_with_format(
-                                &full_img_path,
-                                &bytes,
-                                width as u32,
-                                height as u32,
-                                image::ExtendedColorType::Rgba8,
-                                image::ImageFormat::Png,
-                            ).is_ok() {
-                                let ocr_result = extract_ocr_text(&full_img_path);
-                                let item = ClipItem {
-                                    id: uuid_str,
-                                    text: format!("[Image {}x{}]", width, height),
-                                    is_favorite: false,
-                                    clip_type: "image".to_string(),
-                                    image_path: Some(full_img_path_str),
-                                    image_width: Some(width as u32),
-                                    image_height: Some(height as u32),
-                                    ocr_text: ocr_result,
-                                    full_text_len: 0,
-                                };
+                                if image::save_buffer_with_format(
+                                    &full_img_path,
+                                    &bytes,
+                                    width as u32,
+                                    height as u32,
+                                    image::ExtendedColorType::Rgba8,
+                                    image::ImageFormat::Png,
+                                ).is_ok() {
+                                    let ocr_result = extract_ocr_text(&full_img_path);
+                                    let item = ClipItem {
+                                        id: uuid_str,
+                                        text: format!("[Image {}x{}]", width, height),
+                                        is_favorite: false,
+                                        clip_type: "image".to_string(),
+                                        image_path: Some(full_img_path_str),
+                                        image_width: Some(width as u32),
+                                        image_height: Some(height as u32),
+                                        ocr_text: ocr_result,
+                                        full_text_len: 0,
+                                    };
 
-                                if db_worker.insert_clip(&item).is_ok() {
-                                    if let Ok(deleted_images) = db_worker.prune_history(MAX_HISTORY) {
-                                        for p in deleted_images {
-                                            let path = Path::new(&p);
-                                            let full = if path.is_absolute() { path.to_path_buf() } else { data_dir_worker.join(path) };
-                                            let _ = fs::remove_file(full);
+                                    if db_worker.insert_image_clip(&item, &hash).is_ok() {
+                                        if let Ok(deleted_images) = db_worker.prune_history(MAX_HISTORY) {
+                                            for p in deleted_images {
+                                                let path = Path::new(&p);
+                                                let full = if path.is_absolute() { path.to_path_buf() } else { data_dir_worker.join(path) };
+                                                let _ = fs::remove_file(full);
+                                            }
                                         }
-                                    }
 
-                                    let _ = app_worker.emit("clipboard-new", &item);
+                                        let _ = app_worker.emit("clipboard-new", &item);
+                                    }
                                 }
                             }
                         }

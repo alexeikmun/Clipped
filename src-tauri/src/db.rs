@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -57,7 +57,7 @@ impl Database {
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.pragma_update(None, "cache_size", -64000)?; // 64MB cache
 
-        // Create main clips table
+        // 1. Create main clips table
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS clips (
@@ -69,11 +69,21 @@ impl Database {
                 image_width INTEGER,
                 image_height INTEGER,
                 ocr_text TEXT,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                content_hash TEXT
             );
+            ",
+        )?;
 
+        // 2. Ensure content_hash column exists if table was created in an earlier version
+        let _ = conn.execute("ALTER TABLE clips ADD COLUMN content_hash TEXT;", []);
+
+        // 3. Create indexes and FTS virtual table
+        conn.execute_batch(
+            "
             CREATE INDEX IF NOT EXISTS idx_clips_created_at ON clips(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_clips_is_fav ON clips(is_favorite);
+            CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(content_hash);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS clips_fts USING fts5(
                 id UNINDEXED,
@@ -137,11 +147,10 @@ impl Database {
 
                 let count = items.len();
                 for (idx, item) in items.into_iter().enumerate() {
-                    // Give oldest items smaller timestamp, newer items larger
                     let timestamp = base_time - ((count - idx) as i64 * 10);
                     let _ = tx.execute(
-                        "INSERT OR IGNORE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        "INSERT OR IGNORE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
                         params![
                             item.id,
                             item.text,
@@ -163,9 +172,168 @@ impl Database {
             }
         }
 
-        // Rename legacy file to avoid migrating again
         let migrated_path = self.data_dir.join(format!("{}.migrated", LEGACY_HISTORY_FILE));
         let _ = fs::rename(&legacy_path, &migrated_path);
+    }
+
+    /// Saves a text clip, or if an identical text clip already exists, bumps its timestamp to the top (LRU)
+    pub fn save_or_bump_text(&self, text: String, hash: &str) -> Result<ClipItem> {
+        let conn = self.conn.lock().unwrap();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        // Check if an identical text clip already exists
+        let mut stmt = conn.prepare(
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+             FROM clips WHERE clip_type = 'text' AND (content_hash = ?1 OR text = ?2) LIMIT 1"
+        )?;
+
+        let existing: Option<ClipItem> = stmt.query_row(params![hash, text], |row| {
+            let full_text: String = row.get(1)?;
+            let text_len = full_text.len();
+            Ok(ClipItem {
+                id: row.get(0)?,
+                text: full_text,
+                is_favorite: row.get::<_, i32>(2)? != 0,
+                clip_type: row.get(3)?,
+                image_path: row.get(4)?,
+                image_width: row.get(5)?,
+                image_height: row.get(6)?,
+                ocr_text: row.get(7)?,
+                full_text_len: text_len,
+            })
+        }).optional()?;
+
+        if let Some(clip) = existing {
+            // Existing duplicate found: bump to top and update hash if missing
+            conn.execute(
+                "UPDATE clips SET created_at = ?1, content_hash = ?2 WHERE id = ?3",
+                params![timestamp, hash, clip.id],
+            )?;
+            return Ok(clip);
+        }
+
+        // New clip: insert row and index in FTS
+        let id = Uuid::new_v4().to_string();
+        let text_len = text.len();
+        let new_item = ClipItem {
+            id: id.clone(),
+            text: text.clone(),
+            is_favorite: false,
+            clip_type: "text".to_string(),
+            image_path: None,
+            image_width: None,
+            image_height: None,
+            ocr_text: None,
+            full_text_len: text_len,
+        };
+
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                new_item.id,
+                new_item.text,
+                0,
+                new_item.clip_type,
+                new_item.image_path,
+                new_item.image_width,
+                new_item.image_height,
+                new_item.ocr_text,
+                timestamp,
+                hash
+            ],
+        )?;
+
+        tx.execute(
+            "INSERT INTO clips_fts (id, text, ocr_text) VALUES (?1, ?2, ?3)",
+            params![new_item.id, new_item.text, ""],
+        )?;
+
+        tx.commit()?;
+        Ok(new_item)
+    }
+
+    /// Finds an existing image clip by content hash
+    pub fn find_image_by_hash(&self, hash: &str) -> Result<Option<ClipItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+             FROM clips WHERE clip_type = 'image' AND content_hash = ?1 LIMIT 1"
+        )?;
+
+        let existing = stmt.query_row(params![hash], |row| {
+            let full_text: String = row.get(1)?;
+            let text_len = full_text.len();
+            Ok(ClipItem {
+                id: row.get(0)?,
+                text: full_text,
+                is_favorite: row.get::<_, i32>(2)? != 0,
+                clip_type: row.get(3)?,
+                image_path: row.get(4)?,
+                image_width: row.get(5)?,
+                image_height: row.get(6)?,
+                ocr_text: row.get(7)?,
+                full_text_len: text_len,
+            })
+        }).optional()?;
+
+        Ok(existing)
+    }
+
+    /// Bumps an existing clip's timestamp to now (moves to top of history)
+    pub fn bump_clip_timestamp(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        conn.execute(
+            "UPDATE clips SET created_at = ?1 WHERE id = ?2",
+            params![timestamp, id],
+        )?;
+        Ok(())
+    }
+
+    /// Inserts a new image clip with content hash
+    pub fn insert_image_clip(&self, item: &ClipItem, hash: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        let tx = conn.unchecked_transaction()?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                item.id,
+                item.text,
+                if item.is_favorite { 1 } else { 0 },
+                item.clip_type,
+                item.image_path,
+                item.image_width,
+                item.image_height,
+                item.ocr_text,
+                timestamp,
+                hash
+            ],
+        )?;
+
+        tx.execute("DELETE FROM clips_fts WHERE id = ?1", params![item.id])?;
+        tx.execute(
+            "INSERT INTO clips_fts (id, text, ocr_text) VALUES (?1, ?2, ?3)",
+            params![item.id, item.text, item.ocr_text.as_deref().unwrap_or("")],
+        )?;
+
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn insert_clip(&self, item: &ClipItem) -> Result<()> {
@@ -543,6 +711,47 @@ mod tests {
     }
 
     #[test]
+    fn test_bump_duplicate_to_top() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).expect("init db");
+
+        // 1. Copy Apples
+        let item1 = db.save_or_bump_text("Apples".into(), "hash_apples").unwrap();
+        assert_eq!(item1.text, "Apples");
+
+        // Favorite Apples
+        db.toggle_favorite(&item1.id).unwrap();
+
+        // Short sleep so timestamps differ
+        std::thread::sleep(std::time::Duration::from_millis(15));
+
+        // 2. Copy Pears
+        let item2 = db.save_or_bump_text("Pears".into(), "hash_pears").unwrap();
+        assert_eq!(item2.text, "Pears");
+
+        let history_mid = db.get_history(10, false).unwrap();
+        assert_eq!(history_mid.len(), 2);
+        assert_eq!(history_mid[0].text, "Pears");
+        assert_eq!(history_mid[1].text, "Apples");
+
+        std::thread::sleep(std::time::Duration::from_millis(15));
+
+        // 3. Copy Apples again!
+        let item3 = db.save_or_bump_text("Apples".into(), "hash_apples").unwrap();
+        assert_eq!(item3.id, item1.id);
+        assert!(item3.is_favorite); // Favorite preserved!
+
+        // Verify history has only 2 items, and Apples is bumped to index 0!
+        let history_after = db.get_history(10, false).unwrap();
+        assert_eq!(history_after.len(), 2);
+        assert_eq!(history_after[0].text, "Apples");
+        assert_eq!(history_after[1].text, "Pears");
+        assert!(history_after[0].is_favorite);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_legacy_migration() {
         let dir = temp_db_dir();
         let legacy_file = dir.join(LEGACY_HISTORY_FILE);
@@ -569,6 +778,43 @@ mod tests {
         // Legacy file should have been renamed
         assert!(!legacy_file.exists());
         assert!(dir.join(format!("{}.migrated", LEGACY_HISTORY_FILE)).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_existing_db_schema_upgrade() {
+        let dir = temp_db_dir();
+        let db_path = dir.join(DB_FILE);
+
+        // Simulate an existing database created before content_hash was added
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE clips (
+                    id TEXT PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    is_favorite INTEGER NOT NULL DEFAULT 0,
+                    clip_type TEXT NOT NULL DEFAULT 'text',
+                    image_path TEXT,
+                    image_width INTEGER,
+                    image_height INTEGER,
+                    ocr_text TEXT,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX idx_clips_created_at ON clips(created_at DESC);
+                CREATE INDEX idx_clips_is_fav ON clips(is_favorite);
+                ",
+            ).unwrap();
+        }
+
+        // Now init Database on this directory - must not panic!
+        let db = Database::init(&dir).expect("init existing db must succeed and upgrade schema");
+
+        // Verify we can save_or_bump_text
+        let item = db.save_or_bump_text("Migrated test".into(), "hash123").unwrap();
+        assert_eq!(item.text, "Migrated test");
 
         let _ = fs::remove_dir_all(&dir);
     }

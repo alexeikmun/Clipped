@@ -156,14 +156,17 @@ function App() {
         const newItem = event.payload;
         if (prev.length > 0 && prev[0].id === newItem.id) return prev;
 
+        // Remove previous occurrence of this clip (bump to top)
+        const withoutExisting = prev.filter((item) => item.id !== newItem.id);
+
         const { searchQuery, showFavorites } = stateRef.current;
         if (searchQuery.trim()) {
           return prev;
         }
         if (showFavorites && !newItem.is_favorite) {
-          return prev;
+          return withoutExisting;
         }
-        return [newItem, ...prev].slice(0, 999);
+        return [newItem, ...withoutExisting].slice(0, 999);
       });
       setSelectedIndex(0);
     });
