@@ -345,6 +345,9 @@ pub fn run_app() -> windows::core::Result<()> {
         // Set Per-Monitor V2 DPI awareness
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
+        // Explicit AppUserModelID for Windows Taskbar and Task Manager association
+        let _ = SetCurrentProcessExplicitAppUserModelID(w!("Alexis.Clipped.App"));
+
         let data_dir = get_data_dir();
         let _ = fs::create_dir_all(&data_dir);
         let settings = load_settings(&data_dir);
@@ -986,3 +989,21 @@ unsafe fn load_app_icon(h_instance: HINSTANCE, sm: bool) -> HICON {
     // 3. Fallback to default application icon
     LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
 }
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    #[test]
+    fn test_load_icon() {
+        unsafe {
+            let h_instance = GetModuleHandleW(None).unwrap();
+            let big = load_app_icon(h_instance.into(), false);
+            let sm = load_app_icon(h_instance.into(), true);
+            println!("test_load_icon: big={:?}, sm={:?}", big.0, sm.0);
+            assert!(!big.0.is_null());
+            assert!(!sm.0.is_null());
+        }
+    }
+}
+
