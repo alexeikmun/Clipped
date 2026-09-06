@@ -56,9 +56,10 @@ pub fn detect_language(text: &str) -> Language {
         return Language::Text;
     }
 
-    // 1. JSON check
-    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    // 1. JSON check (cap size to 32KB to avoid heavy AST allocation in paint loop)
+    if trimmed.len() <= 32768
+        && ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+            || (trimmed.starts_with('[') && trimmed.ends_with(']')))
     {
         if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
             return Language::Json;
@@ -95,7 +96,19 @@ pub fn detect_language(text: &str) -> Language {
 }
 
 pub fn tokenize(text: &str) -> Vec<SyntaxToken> {
-    let chars: Vec<char> = text.chars().collect();
+    // Only tokenize up to first 4,000 characters (card fits ~2,000 max)
+    // Ensures sub-millisecond execution even on massive clipboard clips
+    let text_slice = if text.len() > 4000 {
+        let mut end = 4000;
+        while !text.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        &text[..end]
+    } else {
+        text
+    };
+
+    let chars: Vec<char> = text_slice.chars().collect();
     let len = chars.len();
     if len == 0 {
         return Vec::new();
@@ -239,7 +252,8 @@ pub fn tokenize(text: &str) -> Vec<SyntaxToken> {
         // 6. Words: identifiers, keywords, types, function calls
         if c.is_alphabetic() || c == '_' || c == '$' {
             let start = i;
-            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+            i += 1;
+            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
                 i += 1;
             }
 
@@ -320,5 +334,20 @@ mod tests {
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Type));
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Function));
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Comment));
+    }
+
+    #[test]
+    fn test_tokenize_dollar_and_shell() {
+        // Prevents regression of infinite loop on dollar sign
+        let shell = "$ npm run dev\n$var = 42;\n$\n${TEST}";
+        let tokens = tokenize(shell);
+        assert!(!tokens.is_empty());
+    }
+
+    #[test]
+    fn test_tokenize_large_clip_safety() {
+        let large = "let x = 1;\n".repeat(10_000);
+        let tokens = tokenize(&large);
+        assert!(!tokens.is_empty());
     }
 }

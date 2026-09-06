@@ -826,7 +826,16 @@ impl D2dContext {
         default_brush: &ID2D1SolidColorBrush,
     ) {
         if let Some(ref target) = self.render_target {
-            let utf16: Vec<u16> = text.encode_utf16().collect();
+            let text_slice = if text.len() > 4000 {
+                let mut end = 4000;
+                while !text.is_char_boundary(end) && end > 0 {
+                    end -= 1;
+                }
+                &text[..end]
+            } else {
+                text
+            };
+            let utf16: Vec<u16> = text_slice.encode_utf16().collect();
             let w = rect.right - rect.left;
             let h = rect.bottom - rect.top;
             if w <= 0.0 || h <= 0.0 {
@@ -835,7 +844,7 @@ impl D2dContext {
             unsafe {
                 if let Ok(layout) = self.dwrite_factory.CreateTextLayout(&utf16, format, w, h) {
                     if let Some(ref brushes) = self.brushes {
-                        let tokens = crate::syntax::tokenize(text);
+                        let tokens = crate::syntax::tokenize(text_slice);
                         for token in tokens {
                             if token.start_u16 + token.length_u16 <= utf16.len() as u32 {
                                 let range = DWRITE_TEXT_RANGE {
