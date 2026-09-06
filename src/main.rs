@@ -144,19 +144,21 @@ fn center_and_focus_window(window: &MainWindow) {
     use windows::Win32::UI::WindowsAndMessaging::{
         FindWindowW, GetSystemMetrics, GetWindowLongW, SetForegroundWindow,
         SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-        SWP_SHOWWINDOW, WS_EX_TOOLWINDOW,
+        SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_TOOLWINDOW,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 
+    let _ = window.show();
+
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let win_w = 580;
-    let win_h = 380;
+    let size = window.window().size();
+    let win_w = if size.width > 0 { size.width as i32 } else { 580 };
+    let win_h = if size.height > 0 { size.height as i32 } else { 380 };
     let x = (screen_w - win_w) / 2;
     let y = (screen_h - win_h) / 2;
 
     window.window().set_position(slint::PhysicalPosition::new(x, y));
-    let _ = window.show();
 
     unsafe {
         let cached = CACHED_HWND.load(Ordering::Relaxed);
@@ -173,19 +175,9 @@ fn center_and_focus_window(window: &MainWindow) {
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_TOOLWINDOW.0 as i32);
 
             use windows::Win32::Graphics::Dwm::{
-                DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
-                DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-                DWMWCP_ROUND,
+                DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
             };
-            use windows::Win32::UI::Controls::MARGINS;
-
-            let margins = MARGINS {
-                cxLeftWidth: -1,
-                cxRightWidth: -1,
-                cyTopHeight: -1,
-                cyBottomHeight: -1,
-            };
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
 
             let dark_mode = windows::Win32::Foundation::TRUE;
             let _ = DwmSetWindowAttribute(
@@ -203,7 +195,7 @@ fn center_and_focus_window(window: &MainWindow) {
                 std::mem::size_of_val(&corner) as u32,
             );
 
-            let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, win_w, win_h, SWP_SHOWWINDOW);
+            let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
             let _ = SetForegroundWindow(hwnd);
             let _ = SetFocus(hwnd);
         }
