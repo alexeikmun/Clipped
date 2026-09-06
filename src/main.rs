@@ -200,6 +200,7 @@ fn center_and_focus_window(window: &MainWindow) {
             let _ = SetFocus(hwnd);
         }
     }
+    window.window().request_redraw();
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -432,6 +433,7 @@ fn main() {
         main_window.set_search_enabled(false);
         center_and_focus_window(&main_window);
         main_window.invoke_focus_main();
+        main_window.window().request_redraw();
     }
 
     // 5. Global HotKey Manager
@@ -886,6 +888,7 @@ fn main() {
 
                     center_and_focus_window(&w);
                     w.invoke_focus_main();
+                    w.window().request_redraw();
                     ignore_blur_counter = 12; // Give window ~480ms to gain focus before checking blur
                 }
             }
@@ -912,6 +915,7 @@ fn main() {
                 search_enable_counter = 6;
                 center_and_focus_window(&w);
                 w.invoke_focus_main();
+                w.window().request_redraw();
                 ignore_blur_counter = 12;
             }
         }
