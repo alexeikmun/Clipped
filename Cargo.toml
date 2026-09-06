@@ -5,10 +5,6 @@ edition = "2021"
 default-run = "clipped"
 
 [dependencies]
-slint = { version = "1.9", default-features = true }
-global-hotkey = "0.6"
-tray-icon = "0.24"
-muda = "0.19"
 enigo = "0.6.1"
 arboard = "3.6.1"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
@@ -25,18 +21,28 @@ windows = { version = "0.58", features = [
     "Storage",
     "Storage_Streams",
     "Globalization",
+    "Foundation_Numerics",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Ole",
+    "Win32_System_DataExchange",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
 ] }
-
-[build-dependencies]
-slint-build = "1.9"
 
 [profile.release]
 opt-level = "z"

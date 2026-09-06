@@ -48,6 +48,7 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
+#[allow(dead_code)]
 impl Database {
     pub fn init(data_dir: &Path) -> Result<Self> {
         let db_path = data_dir.join(DB_FILE);
@@ -60,7 +61,7 @@ impl Database {
             conn.pragma_update(None, "synchronous", "NORMAL")?;
             conn.pragma_update(None, "temp_store", "MEMORY")?;
             conn.pragma_update(None, "busy_timeout", 5000)?;
-            conn.pragma_update(None, "cache_size", -64000)?; // 64MB cache
+            conn.pragma_update(None, "cache_size", -2000)?; // 2MB cache
         }
 
         // 1. Create main clips table
@@ -699,6 +700,16 @@ impl Database {
         }
 
         Ok(deleted_images)
+    }
+
+    /// Releases unused cached pages from SQLite back to the OS allocator
+    pub fn shrink_memory(&self) {
+        if let Ok(conn) = self.writer_conn.lock() {
+            let _ = conn.execute_batch("PRAGMA shrink_memory;");
+        }
+        if let Ok(conn) = self.reader_conn.lock() {
+            let _ = conn.execute_batch("PRAGMA shrink_memory;");
+        }
     }
 }
 
