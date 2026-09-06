@@ -343,7 +343,8 @@ fn main() {
     let initial_clips = reload_clips(&main_window, &db, &data_dir, false, "", Some(0));
     *cached_clips.lock().unwrap() = initial_clips;
 
-    let show_on_startup = std::env::args().any(|arg| arg == "--show" || arg == "-s");
+    let is_hidden_flag = std::env::args().any(|arg| arg == "--hidden");
+    let show_on_startup = (cfg!(debug_assertions) || std::env::args().any(|arg| arg == "--show" || arg == "-s")) && !is_hidden_flag;
     if show_on_startup {
         is_monitoring.store(false, Ordering::Relaxed);
         center_and_focus_window(&main_window);
@@ -358,26 +359,35 @@ fn main() {
     ));
     let _ = hotkeys_manager.lock().unwrap().register(*active_hotkey.lock().unwrap());
 
-    // 6. System Tray Icon & Menu
     let tray_menu = Menu::new();
     let exit_item = MenuItem::new("Exit", true, None);
     let exit_id = exit_item.id().clone();
     let _ = tray_menu.append(&exit_item);
 
-    let icon_img = image::load_from_memory(include_bytes!("../assets/icon.png"))
-        .unwrap()
-        .resize(32, 32, image::imageops::FilterType::Lanczos3)
-        .to_rgba8();
-    let (w, h) = icon_img.dimensions();
-    let tray_icon_img = tray_icon::Icon::from_rgba(icon_img.into_raw(), w, h).unwrap();
+    let tray_icon_img = tray_icon::Icon::from_path(Path::new("assets/icon.ico"), Some((32, 32)))
+        .or_else(|_| {
+            let icon_img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+                .unwrap()
+                .resize(32, 32, image::imageops::FilterType::Lanczos3)
+                .to_rgba8();
+            let (w, h) = icon_img.dimensions();
+            tray_icon::Icon::from_rgba(icon_img.into_raw(), w, h)
+        })
+        .ok();
 
-    let _tray = match TrayIconBuilder::new()
+    let mut tray_builder = TrayIconBuilder::new()
         .with_menu(Box::new(tray_menu))
-        .with_icon(tray_icon_img)
-        .with_tooltip("Clipped - Clipboard Manager")
-        .build()
-    {
-        Ok(t) => Some(t),
+        .with_tooltip("Clipped - Clipboard Manager");
+
+    if let Some(icon) = tray_icon_img {
+        tray_builder = tray_builder.with_icon(icon);
+    }
+
+    let _tray = match tray_builder.build() {
+        Ok(t) => {
+            println!("System tray icon registered successfully.");
+            Some(t)
+        }
         Err(e) => {
             eprintln!("Warning: failed to build system tray icon: {:?}", e);
             None

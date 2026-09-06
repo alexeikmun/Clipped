@@ -6,8 +6,8 @@ edition = "2021"
 [dependencies]
 slint = { version = "1.9", default-features = true }
 global-hotkey = "0.6"
-tray-icon = "0.19"
-muda = "0.15"
+tray-icon = "0.24"
+muda = "0.19"
 enigo = "0.6.1"
 arboard = "3.6.1"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
