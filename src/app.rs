@@ -344,19 +344,21 @@ pub fn run_app() -> windows::core::Result<()> {
         let data_dir = get_data_dir();
         let _ = fs::create_dir_all(&data_dir);
         let settings = load_settings(&data_dir);
-
         let db = Database::init(&data_dir).expect("Failed to initialize SQLite database");
         let app_state = AppState::new(data_dir.clone(), db, settings)?;
 
         // Register window class
         let class_name = w!("ClippedWindowClass");
         let h_instance = GetModuleHandleW(None)?;
+        let app_icon = load_app_icon(h_instance.into());
 
         let wnd_class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wnd_proc),
             hInstance: h_instance.into(),
+            hIcon: app_icon,
+            hIconSm: app_icon,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
             lpszClassName: class_name,
@@ -384,6 +386,9 @@ pub fn run_app() -> windows::core::Result<()> {
 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
         (*state_ptr).hwnd = hwnd;
+
+        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(app_icon.0 as isize));
+        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(app_icon.0 as isize));
 
         // Apply DWM attributes (rounded corners & dark theme)
         let corner_pref = DWMWCP_ROUND;
@@ -417,7 +422,7 @@ pub fn run_app() -> windows::core::Result<()> {
             uID: 1,
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage: WM_TRAYICON,
-            hIcon: LoadIconW(None, IDI_APPLICATION)?,
+            hIcon: app_icon,
             szTip: tip,
             ..Default::default()
         };
@@ -899,4 +904,61 @@ fn save_image_fast_png(
     let encoder = PngEncoder::new_with_quality(&mut writer, CompressionType::Fast, FilterType::NoFilter);
     encoder.write_image(bytes, width, height, image::ExtendedColorType::Rgba8)?;
     Ok(())
+}
+
+unsafe fn load_app_icon(h_instance: HINSTANCE) -> HICON {
+    // 1. Try loading from compiled PE resource (resource ID 1 embedded via winres)
+    if let Ok(handle) = LoadImageW(
+        h_instance,
+        PCWSTR(1 as *const u16),
+        IMAGE_ICON,
+        0,
+        0,
+        LR_DEFAULTSIZE | LR_SHARED,
+    ) {
+        let hicon = HICON(handle.0);
+        if !hicon.is_invalid() {
+            return hicon;
+        }
+    }
+    if let Ok(icon) = LoadIconW(h_instance, PCWSTR(1 as *const u16)) {
+        if !icon.is_invalid() {
+            return icon;
+        }
+    }
+
+    // 2. Try loading from assets/icon.ico on disk
+    let candidates = [
+        PathBuf::from("assets/icon.ico"),
+        PathBuf::from("../assets/icon.ico"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("assets/icon.ico")))
+            .unwrap_or_default(),
+    ];
+    for p in &candidates {
+        if p.exists() {
+            let wide: Vec<u16> = p
+                .to_string_lossy()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            if let Ok(handle) = LoadImageW(
+                None,
+                PCWSTR(wide.as_ptr()),
+                IMAGE_ICON,
+                0,
+                0,
+                LR_LOADFROMFILE | LR_DEFAULTSIZE,
+            ) {
+                let hicon = HICON(handle.0);
+                if !hicon.is_invalid() {
+                    return hicon;
+                }
+            }
+        }
+    }
+
+    // 3. Fallback to default application icon
+    LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
 }
