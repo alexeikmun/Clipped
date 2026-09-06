@@ -9,13 +9,16 @@ use std::sync::{Arc, RwLock};
 use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
-use std::fs;
+use std::fs::{self, File};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use arboard::Clipboard;
 use enigo::{Enigo, Settings, Keyboard, Direction, Key};
 use uuid::Uuid;
 use serde::{Serialize, Deserialize};
-use xxhash_rust::xxh3::xxh3_64;
+use image::codecs::png::{PngEncoder, CompressionType, FilterType};
+use image::ImageEncoder;
+use xxhash_rust::xxh3::xxh3_128;
 
 pub use db::{ClipItem, Database};
 
@@ -51,6 +54,15 @@ fn extract_ocr_text(image_path: &Path) -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 fn extract_ocr_text(_image_path: &Path) -> Option<String> {
     None
+}
+
+/// P4: Fast PNG encoding with Fast compression and NoFilter
+fn save_image_fast_png(path: &Path, bytes: &[u8], width: u32, height: u32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    let encoder = PngEncoder::new_with_quality(&mut writer, CompressionType::Fast, FilterType::NoFilter);
+    encoder.write_image(bytes, width, height, image::ExtendedColorType::Rgba8)?;
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -315,6 +327,12 @@ pub fn run() {
             };
             app.manage(state);
 
+            // P1: Background reconciliation of orphaned images at startup
+            let db_reconcile = db.clone();
+            thread::spawn(move || {
+                db_reconcile.reconcile_orphaned_images();
+            });
+
             let manager = app.global_shortcut();
             if let Ok(parsed) = settings.shortcut.parse::<Shortcut>() {
                 if let Err(err) = manager.register(parsed) {
@@ -370,7 +388,7 @@ pub fn run() {
                 while let Ok(event) = rx.recv() {
                     match event {
                         ClipboardEvent::Text(text) => {
-                            let hash = format!("{:016x}", xxh3_64(text.as_bytes()));
+                            let hash = format!("{:032x}", xxh3_128(text.as_bytes()));
                             if let Ok(item) = db_worker.save_or_bump_text(text, &hash) {
                                 if let Ok(deleted_images) = db_worker.prune_history(MAX_HISTORY) {
                                     for p in deleted_images {
@@ -389,7 +407,7 @@ pub fn run() {
                             }
                         }
                         ClipboardEvent::Image { width, height, bytes } => {
-                            let hash = format!("{:016x}", xxh3_64(&bytes));
+                            let hash = format!("{:032x}", xxh3_128(&bytes));
                             if let Ok(Some(existing_item)) = db_worker.find_image_by_hash(&hash) {
                                 // Image duplicate: bump to top
                                 let _ = db_worker.bump_clip_timestamp(&existing_item.id);
@@ -404,14 +422,7 @@ pub fn run() {
                                 let full_img_path = images_dir.join(&img_filename);
                                 let full_img_path_str = full_img_path.to_string_lossy().replace('\\', "/");
 
-                                if image::save_buffer_with_format(
-                                    &full_img_path,
-                                    &bytes,
-                                    width as u32,
-                                    height as u32,
-                                    image::ExtendedColorType::Rgba8,
-                                    image::ImageFormat::Png,
-                                ).is_ok() {
+                                if save_image_fast_png(&full_img_path, &bytes, width as u32, height as u32).is_ok() {
                                     let ocr_result = extract_ocr_text(&full_img_path);
                                     let item = ClipItem {
                                         id: uuid_str,
@@ -446,8 +457,8 @@ pub fn run() {
             // Fast clipboard watcher thread: checks & hashes in <0.2ms, dispatches to mpsc channel
             let app_watcher = app.handle().clone();
             thread::spawn(move || {
-                let mut last_text_hash: u64 = 0;
-                let mut last_image_hash: u64 = 0;
+                let mut last_text_hash: u128 = 0;
+                let mut last_image_hash: u128 = 0;
                 let mut clipboard_opt: Option<Clipboard> = Clipboard::new().ok();
 
                 loop {
@@ -463,7 +474,7 @@ pub fn run() {
                                     let trimmed = text.trim();
                                     if !trimmed.is_empty() {
                                         text_found = true;
-                                        let hash = xxh3_64(text.as_bytes());
+                                        let hash = xxh3_128(text.as_bytes());
                                         if hash != last_text_hash {
                                             last_text_hash = hash;
                                             last_image_hash = 0;
@@ -478,7 +489,7 @@ pub fn run() {
                             if !text_found {
                                 match clipboard.get_image() {
                                     Ok(img) => {
-                                        let hash = xxh3_64(&img.bytes);
+                                        let hash = xxh3_128(&img.bytes);
                                         if hash != last_image_hash {
                                             last_image_hash = hash;
                                             last_text_hash = 0;

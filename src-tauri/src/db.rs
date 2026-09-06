@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -42,23 +43,28 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
 }
 
 pub struct Database {
-    conn: Mutex<Connection>,
+    writer_conn: Mutex<Connection>,
+    reader_conn: Mutex<Connection>,
     data_dir: PathBuf,
 }
 
 impl Database {
     pub fn init(data_dir: &Path) -> Result<Self> {
         let db_path = data_dir.join(DB_FILE);
-        let conn = Connection::open(db_path)?;
+        let writer_conn = Connection::open(&db_path)?;
+        let reader_conn = Connection::open(&db_path)?;
 
-        // Configure SQLite for high performance and concurrency
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "temp_store", "MEMORY")?;
-        conn.pragma_update(None, "cache_size", -64000)?; // 64MB cache
+        // Configure both connections for high-concurrency WAL mode
+        for conn in [&writer_conn, &reader_conn] {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+            conn.pragma_update(None, "synchronous", "NORMAL")?;
+            conn.pragma_update(None, "temp_store", "MEMORY")?;
+            conn.pragma_update(None, "busy_timeout", 5000)?;
+            conn.pragma_update(None, "cache_size", -64000)?; // 64MB cache
+        }
 
         // 1. Create main clips table
-        conn.execute_batch(
+        writer_conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS clips (
                 id TEXT PRIMARY KEY,
@@ -75,27 +81,61 @@ impl Database {
             ",
         )?;
 
-        // 2. Ensure content_hash column exists if table was created in an earlier version
-        let _ = conn.execute("ALTER TABLE clips ADD COLUMN content_hash TEXT;", []);
+        // Ensure content_hash column exists if upgrading from an older schema
+        let _ = writer_conn.execute("ALTER TABLE clips ADD COLUMN content_hash TEXT;", []);
 
-        // 3. Create indexes and FTS virtual table
-        conn.execute_batch(
+        // 2. Create B-tree indexes
+        writer_conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_clips_created_at ON clips(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_clips_is_fav ON clips(is_favorite);
             CREATE INDEX IF NOT EXISTS idx_clips_hash ON clips(content_hash);
+            ",
+        )?;
+
+        // 3. Configure FTS5 external content table and automatic synchronization triggers
+        writer_conn.execute_batch(
+            "
+            DROP TABLE IF EXISTS clips_fts;
 
             CREATE VIRTUAL TABLE IF NOT EXISTS clips_fts USING fts5(
-                id UNINDEXED,
                 text,
                 ocr_text,
+                content='clips',
+                content_rowid='rowid',
                 tokenize='unicode61'
             );
+
+            -- Initial population for any pre-existing rows
+            INSERT INTO clips_fts(rowid, text, ocr_text)
+            SELECT rowid, text, COALESCE(ocr_text, '') FROM clips;
+
+            -- Triggers to keep FTS index synced with zero Rust overhead
+            DROP TRIGGER IF EXISTS clips_ai;
+            CREATE TRIGGER clips_ai AFTER INSERT ON clips BEGIN
+                INSERT INTO clips_fts(rowid, text, ocr_text)
+                VALUES (new.rowid, new.text, COALESCE(new.ocr_text, ''));
+            END;
+
+            DROP TRIGGER IF EXISTS clips_ad;
+            CREATE TRIGGER clips_ad AFTER DELETE ON clips BEGIN
+                INSERT INTO clips_fts(clips_fts, rowid, text, ocr_text)
+                VALUES('delete', old.rowid, old.text, COALESCE(old.ocr_text, ''));
+            END;
+
+            DROP TRIGGER IF EXISTS clips_au;
+            CREATE TRIGGER clips_au AFTER UPDATE ON clips BEGIN
+                INSERT INTO clips_fts(clips_fts, rowid, text, ocr_text)
+                VALUES('delete', old.rowid, old.text, COALESCE(old.ocr_text, ''));
+                INSERT INTO clips_fts(rowid, text, ocr_text)
+                VALUES (new.rowid, new.text, COALESCE(new.ocr_text, ''));
+            END;
             ",
         )?;
 
         let db = Database {
-            conn: Mutex::new(conn),
+            writer_conn: Mutex::new(writer_conn),
+            reader_conn: Mutex::new(reader_conn),
             data_dir: data_dir.to_path_buf(),
         };
 
@@ -103,6 +143,49 @@ impl Database {
         db.migrate_legacy_history();
 
         Ok(db)
+    }
+
+    /// P1: Startup orphan image file reconciliation
+    pub fn reconcile_orphaned_images(&self) {
+        let images_dir = self.data_dir.join("images");
+        if !images_dir.exists() {
+            return;
+        }
+
+        let Ok(indexed) = self.get_all_image_paths() else {
+            return;
+        };
+
+        let Ok(entries) = fs::read_dir(&images_dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let norm = path.to_string_lossy().replace('\\', "/");
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let is_indexed = indexed.iter().any(|idx_path| {
+                    idx_path == &norm || (!file_name.is_empty() && idx_path.ends_with(file_name))
+                });
+                if !is_indexed {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
+    pub fn get_all_image_paths(&self) -> Result<HashSet<String>> {
+        let conn = self.reader_conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT image_path FROM clips WHERE clip_type = 'image' AND image_path IS NOT NULL"
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut paths = HashSet::new();
+        for p in rows.flatten() {
+            paths.insert(p.replace('\\', "/"));
+        }
+        Ok(paths)
     }
 
     fn migrate_legacy_history(&self) {
@@ -137,7 +220,7 @@ impl Database {
         }
 
         if !items.is_empty() {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.writer_conn.lock().unwrap();
             let tx = conn.unchecked_transaction();
             if let Ok(tx) = tx {
                 let base_time = SystemTime::now()
@@ -163,10 +246,6 @@ impl Database {
                             timestamp
                         ],
                     );
-                    let _ = tx.execute(
-                        "INSERT OR IGNORE INTO clips_fts (id, text, ocr_text) VALUES (?1, ?2, ?3)",
-                        params![item.id, item.text, item.ocr_text.unwrap_or_default()],
-                    );
                 }
                 let _ = tx.commit();
             }
@@ -176,21 +255,21 @@ impl Database {
         let _ = fs::rename(&legacy_path, &migrated_path);
     }
 
-    /// Saves a text clip, or if an identical text clip already exists, bumps its timestamp to the top (LRU)
+    /// Saves a text clip, or bumps an existing clip to the top via indexed 128-bit hash
     pub fn save_or_bump_text(&self, text: String, hash: &str) -> Result<ClipItem> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.writer_conn.lock().unwrap();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
 
-        // Check if an identical text clip already exists
+        // P5: Direct indexed lookup by content_hash only (no slow OR text = ?)
         let mut stmt = conn.prepare(
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
-             FROM clips WHERE clip_type = 'text' AND (content_hash = ?1 OR text = ?2) LIMIT 1"
+             FROM clips WHERE clip_type = 'text' AND content_hash = ?1 LIMIT 1"
         )?;
 
-        let existing: Option<ClipItem> = stmt.query_row(params![hash, text], |row| {
+        let existing: Option<ClipItem> = stmt.query_row(params![hash], |row| {
             let full_text: String = row.get(1)?;
             let text_len = full_text.len();
             Ok(ClipItem {
@@ -207,15 +286,14 @@ impl Database {
         }).optional()?;
 
         if let Some(clip) = existing {
-            // Existing duplicate found: bump to top and update hash if missing
             conn.execute(
-                "UPDATE clips SET created_at = ?1, content_hash = ?2 WHERE id = ?3",
-                params![timestamp, hash, clip.id],
+                "UPDATE clips SET created_at = ?1 WHERE id = ?2",
+                params![timestamp, clip.id],
             )?;
             return Ok(clip);
         }
 
-        // New clip: insert row and index in FTS
+        // New clip
         let id = Uuid::new_v4().to_string();
         let text_len = text.len();
         let new_item = ClipItem {
@@ -230,14 +308,12 @@ impl Database {
             full_text_len: text_len,
         };
 
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
+        conn.execute(
             "INSERT INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 new_item.id,
                 new_item.text,
-                0,
                 new_item.clip_type,
                 new_item.image_path,
                 new_item.image_width,
@@ -248,18 +324,12 @@ impl Database {
             ],
         )?;
 
-        tx.execute(
-            "INSERT INTO clips_fts (id, text, ocr_text) VALUES (?1, ?2, ?3)",
-            params![new_item.id, new_item.text, ""],
-        )?;
-
-        tx.commit()?;
         Ok(new_item)
     }
 
-    /// Finds an existing image clip by content hash
+    /// Finds an existing image clip by content hash via reader connection
     pub fn find_image_by_hash(&self, hash: &str) -> Result<Option<ClipItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.reader_conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
              FROM clips WHERE clip_type = 'image' AND content_hash = ?1 LIMIT 1"
@@ -286,7 +356,7 @@ impl Database {
 
     /// Bumps an existing clip's timestamp to now (moves to top of history)
     pub fn bump_clip_timestamp(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.writer_conn.lock().unwrap();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -301,15 +371,13 @@ impl Database {
 
     /// Inserts a new image clip with content hash
     pub fn insert_image_clip(&self, item: &ClipItem, hash: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.writer_conn.lock().unwrap();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let tx = conn.unchecked_transaction()?;
-
-        tx.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
@@ -326,28 +394,19 @@ impl Database {
             ],
         )?;
 
-        tx.execute("DELETE FROM clips_fts WHERE id = ?1", params![item.id])?;
-        tx.execute(
-            "INSERT INTO clips_fts (id, text, ocr_text) VALUES (?1, ?2, ?3)",
-            params![item.id, item.text, item.ocr_text.as_deref().unwrap_or("")],
-        )?;
-
-        tx.commit()?;
         Ok(())
     }
 
     pub fn insert_clip(&self, item: &ClipItem) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.writer_conn.lock().unwrap();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
 
-        let tx = conn.unchecked_transaction()?;
-
-        tx.execute(
-            "INSERT OR REPLACE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        conn.execute(
+            "INSERT OR REPLACE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
             params![
                 item.id,
                 item.text,
@@ -361,19 +420,11 @@ impl Database {
             ],
         )?;
 
-        // Keep FTS table in sync
-        tx.execute("DELETE FROM clips_fts WHERE id = ?1", params![item.id])?;
-        tx.execute(
-            "INSERT INTO clips_fts (id, text, ocr_text) VALUES (?1, ?2, ?3)",
-            params![item.id, item.text, item.ocr_text.as_deref().unwrap_or("")],
-        )?;
-
-        tx.commit()?;
         Ok(())
     }
 
     pub fn get_latest_item(&self) -> Result<Option<ClipItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.reader_conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
              FROM clips ORDER BY created_at DESC LIMIT 1"
@@ -400,7 +451,7 @@ impl Database {
     }
 
     pub fn get_history(&self, limit: usize, favorites_only: bool) -> Result<Vec<ClipItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.reader_conn.lock().unwrap();
         let sql = if favorites_only {
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
              FROM clips WHERE is_favorite = 1 ORDER BY created_at DESC LIMIT ?1"
@@ -444,7 +495,7 @@ impl Database {
             return self.get_history(limit, favorites_only);
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.reader_conn.lock().unwrap();
 
         // 1. Build sanitized FTS5 prefix query
         let terms: Vec<String> = trimmed
@@ -459,17 +510,18 @@ impl Database {
 
         if !terms.is_empty() {
             let fts_expr = terms.join(" ");
+            // P3: External content table query uses direct c.rowid = f.rowid join
             let fts_sql = if favorites_only {
                 "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text
                  FROM clips c
-                 JOIN clips_fts f ON c.id = f.id
+                 JOIN clips_fts f ON c.rowid = f.rowid
                  WHERE clips_fts MATCH ?1 AND c.is_favorite = 1
                  ORDER BY bm25(clips_fts), c.created_at DESC
                  LIMIT ?2"
             } else {
                 "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text
                  FROM clips c
-                 JOIN clips_fts f ON c.id = f.id
+                 JOIN clips_fts f ON c.rowid = f.rowid
                  WHERE clips_fts MATCH ?1
                  ORDER BY bm25(clips_fts), c.created_at DESC
                  LIMIT ?2"
@@ -551,7 +603,7 @@ impl Database {
     }
 
     pub fn get_full_clip(&self, id: &str) -> Result<Option<ClipItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.reader_conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
              FROM clips WHERE id = ?1 LIMIT 1"
@@ -578,7 +630,7 @@ impl Database {
     }
 
     pub fn toggle_favorite(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.writer_conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT is_favorite FROM clips WHERE id = ?1")?;
         let is_fav: Option<i32> = stmt.query_row(params![id], |r| r.get(0)).ok();
 
@@ -595,7 +647,7 @@ impl Database {
     }
 
     pub fn prune_history(&self, max_items: usize) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.writer_conn.lock().unwrap();
         let total_count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
 
         if total_count <= max_items as i64 {
@@ -630,7 +682,6 @@ impl Database {
             let tx = conn.unchecked_transaction()?;
             for id in &to_delete_ids {
                 tx.execute("DELETE FROM clips WHERE id = ?1", params![id])?;
-                tx.execute("DELETE FROM clips_fts WHERE id = ?1", params![id])?;
             }
             tx.commit()?;
         }
@@ -706,7 +757,6 @@ mod tests {
         let favs_after = db.get_history(10, true).unwrap();
         assert_eq!(favs_after.len(), 2);
 
-        // Test cleanup
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -722,7 +772,6 @@ mod tests {
         // Favorite Apples
         db.toggle_favorite(&item1.id).unwrap();
 
-        // Short sleep so timestamps differ
         std::thread::sleep(std::time::Duration::from_millis(15));
 
         // 2. Copy Pears
@@ -775,9 +824,45 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, "old-1");
 
-        // Legacy file should have been renamed
         assert!(!legacy_file.exists());
         assert!(dir.join(format!("{}.migrated", LEGACY_HISTORY_FILE)).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_orphan_reconciliation() {
+        let dir = temp_db_dir();
+        let images_dir = dir.join("images");
+        fs::create_dir_all(&images_dir).unwrap();
+
+        // Create 1 valid image clip and 1 orphan image file
+        let valid_file = images_dir.join("valid.png");
+        let orphan_file = images_dir.join("orphan.png");
+        fs::write(&valid_file, b"valid").unwrap();
+        fs::write(&orphan_file, b"orphan").unwrap();
+
+        let db = Database::init(&dir).expect("init db");
+
+        let clip = ClipItem {
+            id: "img1".into(),
+            text: "[Image]".into(),
+            is_favorite: false,
+            clip_type: "image".into(),
+            image_path: Some(valid_file.to_string_lossy().replace('\\', "/")),
+            image_width: Some(100),
+            image_height: Some(100),
+            ocr_text: None,
+            full_text_len: 0,
+        };
+        db.insert_image_clip(&clip, "hash_valid").unwrap();
+
+        // Run reconciliation
+        db.reconcile_orphaned_images();
+
+        // Valid file stays, orphan file is removed!
+        assert!(valid_file.exists());
+        assert!(!orphan_file.exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -809,10 +894,9 @@ mod tests {
             ).unwrap();
         }
 
-        // Now init Database on this directory - must not panic!
+        // Init Database - must upgrade and not panic
         let db = Database::init(&dir).expect("init existing db must succeed and upgrade schema");
 
-        // Verify we can save_or_bump_text
         let item = db.save_or_bump_text("Migrated test".into(), "hash123").unwrap();
         assert_eq!(item.text, "Migrated test");
 
