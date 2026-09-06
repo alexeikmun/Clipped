@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+﻿import { useState, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
@@ -13,6 +13,7 @@ interface ClipItem {
   image_path?: string;
   image_width?: number;
   image_height?: number;
+  ocr_text?: string;
 }
 
 interface SearchResult {
@@ -79,23 +80,17 @@ function App() {
 
     items.forEach(item => {
       const lowerText = item.text.toLowerCase();
+      const lowerOcr = (item.ocr_text || "").toLowerCase();
+      const combined = lowerText + " " + lowerOcr;
       
       // Strict AND matching: all terms must be present
-      const allTermsMatch = terms.every(term => lowerText.includes(term));
+      const allTermsMatch = terms.every(term => combined.includes(term));
       
       if (allTermsMatch) {
-        // Calculate a simple score for sorting
-        // 1. Exact match (highest)
-        // 2. Starts with query (high)
-        // 3. Contains all terms (base)
-        // 4. Term proximity (optional, maybe later)
-        
         let score = 1;
         if (lowerText === lowerQuery) score += 100;
         else if (lowerText.startsWith(lowerQuery)) score += 50;
-        
-        // Boost if terms are close to each other or in order?
-        // For now, just recency (preserved by loop order) + prefix match is good enough.
+        else if (lowerOcr.includes(lowerQuery)) score += 30;
         
         results.push({ item, score });
       }
@@ -507,6 +502,8 @@ function App() {
             width={item.image_width}
             height={item.image_height}
             text={item.text}
+            ocrText={item.ocr_text}
+            query={searchQuery}
             isCompact={isSearchVisible}
           />
         ) : (

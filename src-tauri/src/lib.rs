@@ -37,6 +37,38 @@ pub struct ClipItem {
     pub image_width: Option<u32>,
     #[serde(default)]
     pub image_height: Option<u32>,
+    #[serde(default)]
+    pub ocr_text: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+fn extract_ocr_text(image_path: &Path) -> Option<String> {
+    use windows::core::HSTRING;
+    use windows::Graphics::Imaging::BitmapDecoder;
+    use windows::Media::Ocr::OcrEngine;
+    use windows::Storage::FileAccessMode;
+    use windows::Storage::StorageFile;
+
+    let path_buf = image_path.to_path_buf();
+    let path_str = path_buf.to_string_lossy().replace('/', "\\");
+    let file = StorageFile::GetFileFromPathAsync(&HSTRING::from(path_str.as_str())).ok()?.get().ok()?;
+    let stream = file.OpenAsync(FileAccessMode::Read).ok()?.get().ok()?;
+    let decoder = BitmapDecoder::CreateAsync(&stream).ok()?.get().ok()?;
+    let bitmap = decoder.GetSoftwareBitmapAsync().ok()?.get().ok()?;
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages().ok()?;
+    let result = engine.RecognizeAsync(&bitmap).ok()?.get().ok()?;
+    let text = result.Text().ok()?.to_string();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn extract_ocr_text(_image_path: &Path) -> Option<String> {
+    None
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -59,15 +91,29 @@ fn load_history(data_dir: &Path) -> Vec<ClipItem> {
 
     // Try to parse as new format
     if let Ok(mut history) = serde_json::from_str::<Vec<ClipItem>>(&content) {
+        let mut needs_save = false;
         for item in &mut history {
             if item.clip_type == "image" {
                 if let Some(ref rel_or_abs) = item.image_path {
                     let path = Path::new(rel_or_abs);
-                    if !path.is_absolute() {
-                        item.image_path = Some(data_dir.join(path).to_string_lossy().replace('\\', "/"));
+                    let full_path = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        data_dir.join(path)
+                    };
+                    item.image_path = Some(full_path.to_string_lossy().replace('\\', "/"));
+
+                    if item.ocr_text.is_none() && full_path.exists() {
+                        if let Some(ocr) = extract_ocr_text(&full_path) {
+                            item.ocr_text = Some(ocr);
+                            needs_save = true;
+                        }
                     }
                 }
             }
+        }
+        if needs_save {
+            save_history(data_dir, &history);
         }
         return history;
     }
@@ -81,6 +127,7 @@ fn load_history(data_dir: &Path) -> Vec<ClipItem> {
             image_path: None,
             image_width: None,
             image_height: None,
+            ocr_text: None,
         }).collect();
     }
     Vec::new()
@@ -257,6 +304,13 @@ fn set_shortcut(app: AppHandle, state: tauri::State<AppState>, shortcut: String)
     Ok(settings.shortcut.clone())
 }
 
+#[tauri::command]
+fn copy_text(text: String) -> Result<(), String> {
+    let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(&text).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -402,6 +456,7 @@ pub fn run() {
                                                         image_path: None,
                                                         image_width: None,
                                                         image_height: None,
+                                                        ocr_text: None,
                                                     };
 
                                                     history.insert(0, new_item.clone());
@@ -465,6 +520,7 @@ pub fn run() {
                                                 image::ExtendedColorType::Rgba8,
                                                 image::ImageFormat::Png,
                                             ).is_ok() {
+                                                let ocr_result = extract_ocr_text(&full_img_path);
                                                 let new_item = ClipItem {
                                                     id: uuid_str,
                                                     text: format!("[Image {}x{}]", img.width, img.height),
@@ -473,6 +529,7 @@ pub fn run() {
                                                     image_path: Some(full_img_path_str),
                                                     image_width: Some(img.width as u32),
                                                     image_height: Some(img.height as u32),
+                                                    ocr_text: ocr_result,
                                                 };
 
                                                 if let Ok(mut history) = state.history.write() {
@@ -516,7 +573,7 @@ pub fn run() {
             
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history, hide_app, toggle_favorite, get_settings, set_shortcut])
+        .invoke_handler(tauri::generate_handler![paste_item, set_monitoring, get_history, hide_app, toggle_favorite, get_settings, set_shortcut, copy_text])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

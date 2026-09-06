@@ -29,7 +29,14 @@ arboard = "3.6.1"
 tauri-plugin-autostart = "2.5.1"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage",
+    "Storage_Streams",
+    "Globalization",
+] }
 
 [profile.release]
 opt-level = "z"
