@@ -15,7 +15,7 @@ export struct ClipData {
 export component MainWindow inherits Window {
     title: "Clipped";
     no-frame: true;
-    background: #1e1e2e;
+    background: #181825;
     width: 480px;
     height: 360px;
     default-font-family: "Segoe UI, -apple-system, system-ui, sans-serif";
@@ -144,23 +144,23 @@ export component MainWindow inherits Window {
         card := Rectangle {
             width: 100%;
             height: 100%;
-            background: #1e1e2e;
-            border-radius: 20px;
+            background: #181825;
+            border-radius: 12px;
             border-width: 1px;
-            border-color: #ffffff14;
+            border-color: #ffffff18;
             clip: true;
 
             VerticalLayout {
-                padding-top: 14px;
-                padding-bottom: 16px;
-                padding-left: 18px;
-                padding-right: 18px;
-                spacing: 12px;
+                padding-top: 12px;
+                padding-bottom: 12px;
+                padding-left: 14px;
+                padding-right: 14px;
+                spacing: 10px;
 
                 // Header
                 header := HorizontalLayout {
                     alignment: center;
-                    spacing: 12px;
+                    spacing: 10px;
                     height: 28px;
 
                     if root.show_settings : Text {
@@ -276,6 +276,10 @@ export component MainWindow inherits Window {
 
                 // Content Viewport
                 content_rect := Rectangle {
+                    background: #11111b;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #ffffff0a;
                     clip: true;
 
                     content_touch := TouchArea {
@@ -380,117 +384,99 @@ export component MainWindow inherits Window {
 
                     // 3. Single Card View (when not searching and not favorites)
                     if !root.show_settings && !root.is_search_visible && !root.show_favorites && root.clips.length > 0 : ScrollView {
+                        width: 100%;
+                        height: 100%;
+
                         VerticalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            padding-top: 6px;
-                            padding-bottom: 28px;
+                            padding-left: 14px;
+                            padding-right: 14px;
+                            padding-top: 12px;
+                            padding-bottom: 52px;
                             alignment: start;
 
-                            single_card := Rectangle {
-                                border-radius: 8px;
-                                background: root.clips[root.selected_index].is_favorite ? #fbbf2433 : #ffffff26;
+                            // Image clip
+                            if root.clips[root.selected_index].clip_type == "image" : VerticalLayout {
+                                spacing: 10px;
+                                alignment: center;
 
-                                // Left accent bar
                                 Rectangle {
-                                    x: 0;
-                                    y: 4px;
-                                    width: 3px;
-                                    height: parent.height - 8px;
-                                    border-radius: 1.5px;
-                                    background: root.clips[root.selected_index].is_favorite ? #fbbf24 : #646cff;
+                                    border-radius: 8px;
+                                    background: #00000040;
+                                    clip: true;
+                                    height: 180px;
+
+                                    Image {
+                                        source: root.active_image;
+                                        width: 100%;
+                                        height: 100%;
+                                        image-fit: contain;
+                                    }
                                 }
 
-                                VerticalLayout {
-                                    padding-left: 14px;
-                                    padding-right: 14px;
-                                    padding-top: 10px;
-                                    padding-bottom: 12px;
+                                HorizontalLayout {
+                                    alignment: center;
                                     spacing: 8px;
-                                    alignment: start;
 
-                                    // Image clip
-                                    if root.clips[root.selected_index].clip_type == "image" : VerticalLayout {
-                                        spacing: 10px;
-                                        alignment: center;
-
-                                        Rectangle {
-                                            border-radius: 10px;
-                                            background: #00000040;
-                                            clip: true;
-                                            height: 180px;
-
-                                            Image {
-                                                source: root.active_image;
-                                                width: 100%;
-                                                height: 100%;
-                                                image-fit: contain;
-                                            }
-                                        }
+                                    Rectangle {
+                                        background: #ffffff14;
+                                        border-radius: 6px;
+                                        height: 22px;
 
                                         HorizontalLayout {
-                                            alignment: center;
-                                            spacing: 8px;
-
-                                            Rectangle {
-                                                background: #ffffff14;
-                                                border-radius: 6px;
-                                                height: 22px;
-
-                                                HorizontalLayout {
-                                                    padding-left: 8px;
-                                                    padding-right: 8px;
-                                                    Text {
-                                                        text: root.clips[root.selected_index].dimension_text;
-                                                        color: #aaaaaa;
-                                                        font-size: 11px;
-                                                        vertical-alignment: center;
-                                                    }
-                                                }
+                                            padding-left: 8px;
+                                            padding-right: 8px;
+                                            Text {
+                                                text: root.clips[root.selected_index].dimension_text;
+                                                color: #aaaaaa;
+                                                font-size: 11px;
+                                                vertical-alignment: center;
                                             }
                                         }
-
-                                        if root.clips[root.selected_index].ocr_text != "" : Rectangle {
-                                            background: #0000004d;
-                                            border-radius: 6px;
-
-                                            VerticalLayout {
-                                                padding: 8px;
-                                                Text {
-                                                    text: root.clips[root.selected_index].ocr_text;
-                                                    color: #dddddd;
-                                                    font-size: 12px;
-                                                    wrap: word-wrap;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Text clip
-                                    if root.clips[root.selected_index].clip_type != "image" : Text {
-                                        text: root.clips[root.selected_index].text;
-                                        color: #f8fafc;
-                                        font-size: 14px;
-                                        wrap: word-wrap;
                                     }
                                 }
+
+                                if root.clips[root.selected_index].ocr_text != "" : Rectangle {
+                                    background: #0000004d;
+                                    border-radius: 6px;
+
+                                    VerticalLayout {
+                                        padding: 8px;
+                                        Text {
+                                            text: root.clips[root.selected_index].ocr_text;
+                                            color: #dddddd;
+                                            font-size: 12px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Text clip
+                            if root.clips[root.selected_index].clip_type != "image" : Text {
+                                text: root.clips[root.selected_index].text;
+                                color: #f1f5f9;
+                                font-size: 13.5px;
+                                wrap: word-wrap;
                             }
                         }
                     }
 
                     // 4. Multi-Item List View (search or favorites filter)
                     if !root.show_settings && (root.is_search_visible || root.show_favorites) && root.clips.length > 0 : ScrollView {
+                        width: 100%;
+                        height: 100%;
+
                         VerticalLayout {
-                            padding: 10px;
-                            spacing: 4px;
+                            padding: 6px;
+                            spacing: 3px;
                             alignment: start;
 
                             for clip[idx] in root.clips : item_row := Rectangle {
-                                height: 38px;
-                                border-radius: 8px;
+                                height: 36px;
+                                border-radius: 6px;
                                 background: (idx == root.selected_index) 
-                                    ? (clip.is_favorite ? #fbbf2433 : #ffffff26)
-                                    : (item_touch.has-hover ? #ffffff0d : #00000000);
+                                    ? (clip.is_favorite ? #fbbf2433 : #ffffff18)
+                                    : (item_touch.has-hover ? #ffffff0a : #00000000);
 
                                 if (idx == root.selected_index) || clip.is_favorite : Rectangle {
                                     x: 0;
@@ -509,8 +495,8 @@ export component MainWindow inherits Window {
                                 }
 
                                 HorizontalLayout {
-                                    padding-left: 14px;
-                                    padding-right: 14px;
+                                    padding-left: 12px;
+                                    padding-right: 12px;
                                     spacing: 8px;
                                     alignment: center;
 
@@ -543,10 +529,10 @@ export component MainWindow inherits Window {
                 width: 78px;
                 height: 30px;
                 border-radius: 15px;
-                background: #12121eeb;
+                background: #141422f2;
                 border-width: 1px;
                 border-color: #ffffff26;
-                opacity: (content_touch.has-hover || dock_touch.has-hover) ? 1.0 : 0.85;
+                opacity: (content_touch.has-hover || dock_touch.has-hover) ? 1.0 : 0.0;
 
                 animate opacity { duration: 150ms; easing: ease-out; }
 

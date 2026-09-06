@@ -140,25 +140,18 @@ static PREVIOUS_FOREGROUND_HWND: std::sync::atomic::AtomicIsize = std::sync::ato
 #[cfg(target_os = "windows")]
 fn center_and_focus_window(window: &MainWindow) {
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetSystemMetrics, GetWindowLongW, SetForegroundWindow,
+        FindWindowW, GetSystemMetrics, GetWindowLongW, GetWindowRect, SetForegroundWindow,
         SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-        SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_TOOLWINDOW,
+        SWP_FRAMECHANGED, SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_TOOLWINDOW,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 
     let _ = window.show();
-
-    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let size = window.window().size();
-    let win_w = if size.width > 0 { size.width as i32 } else { 480 };
-    let win_h = if size.height > 0 { size.height as i32 } else { 360 };
-    let x = (screen_w - win_w) / 2;
-    let y = (screen_h - win_h) / 2;
-
-    window.window().set_position(slint::PhysicalPosition::new(x, y));
 
     unsafe {
         let cached = CACHED_HWND.load(Ordering::Relaxed);
@@ -195,7 +188,17 @@ fn center_and_focus_window(window: &MainWindow) {
                 std::mem::size_of_val(&corner) as u32,
             );
 
-            let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+            let mut wr = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut wr);
+            let win_w = wr.right - wr.left;
+            let win_h = wr.bottom - wr.top;
+            let screen_w = GetSystemMetrics(SM_CXSCREEN);
+            let screen_h = GetSystemMetrics(SM_CYSCREEN);
+            let x = (screen_w - win_w) / 2;
+            let y = (screen_h - win_h) / 2;
+
+            let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_FRAME | RDW_ALLCHILDREN);
             let _ = SetForegroundWindow(hwnd);
             let _ = SetFocus(hwnd);
         }
@@ -431,6 +434,11 @@ fn main() {
         main_window.set_is_search_visible(false);
         main_window.set_search_query("".into());
         main_window.set_search_enabled(false);
+        main_window.set_selected_index(-1);
+        main_window.set_selected_index(0);
+        let clips_guard = cached_clips.lock().unwrap();
+        refresh_active_image(&main_window, &clips_guard, 0, &data_dir);
+        drop(clips_guard);
         center_and_focus_window(&main_window);
         main_window.invoke_focus_main();
         main_window.window().request_redraw();
@@ -838,9 +846,16 @@ fn main() {
     let is_monitoring_timer = is_monitoring.clone();
     let mut ignore_blur_counter: u32 = if show_on_startup { 12 } else { 0 };
     let mut search_enable_counter: u32 = if show_on_startup { 6 } else { 0 };
+    let mut redraw_counter: u32 = if show_on_startup { 4 } else { 0 };
 
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(40), move || {
         let Some(w) = window_weak.upgrade() else { return; };
+
+        // Force consecutive redraws across event loop frames after show to avoid DPI unpainted borders
+        if redraw_counter > 0 {
+            redraw_counter -= 1;
+            w.window().request_redraw();
+        }
 
         // Enable search after hotkey release window
         if search_enable_counter > 0 {
@@ -882,8 +897,12 @@ fn main() {
                     w.set_show_favorites(false);
                     w.set_search_enabled(false);
                     search_enable_counter = 6;
+                    redraw_counter = 4;
 
                     let updated = reload_clips(&w, &db_timer, &data_dir_timer, false, "", Some(0));
+                    w.set_selected_index(-1);
+                    w.set_selected_index(0);
+                    refresh_active_image(&w, &updated, 0, &data_dir_timer);
                     *cached_clips_timer.lock().unwrap() = updated;
 
                     center_and_focus_window(&w);
@@ -913,6 +932,7 @@ fn main() {
                 w.set_search_query("".into());
                 w.set_search_enabled(false);
                 search_enable_counter = 6;
+                redraw_counter = 4;
                 center_and_focus_window(&w);
                 w.invoke_focus_main();
                 w.window().request_redraw();
