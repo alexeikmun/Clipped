@@ -261,6 +261,21 @@ fn copy_text(state: tauri::State<AppState>, text: String, id: Option<String>) ->
     Ok(())
 }
 
+#[tauri::command]
+fn delete_clip(state: tauri::State<AppState>, id: String) -> Result<bool, String> {
+    let img_path = state.db.delete_clip(&id).map_err(|e| e.to_string())?;
+    if let Some(p) = img_path {
+        let path = Path::new(&p);
+        let full = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            state.data_dir.join(path)
+        };
+        let _ = fs::remove_file(full);
+    }
+    Ok(true)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -286,13 +301,22 @@ pub fn run() {
                 .build()
         )
         .on_window_event(|window, event| {
-            if let WindowEvent::Focused(focused) = event {
-                // If window loses focus and is visible, hide it
-                if !focused && window.is_visible().unwrap_or(false) {
+            match event {
+                WindowEvent::Focused(focused) => {
+                    // If window loses focus and is visible, hide it
+                    if !focused && window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                        let state = window.state::<AppState>();
+                        state.is_monitoring.store(true, Ordering::Relaxed);
+                    }
+                }
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
                     let _ = window.hide();
                     let state = window.state::<AppState>();
                     state.is_monitoring.store(true, Ordering::Relaxed);
                 }
+                _ => {}
             }
         })
         .plugin(tauri_plugin_autostart::init(
@@ -521,7 +545,8 @@ pub fn run() {
             toggle_favorite,
             get_settings,
             set_shortcut,
-            copy_text
+            copy_text,
+            delete_clip
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

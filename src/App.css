@@ -191,7 +191,7 @@ body {
   display: flex;
   align-items: center;
   position: relative;
-  padding-right: 32px; /* Make space for absolute positioned star */
+  padding-right: 56px; /* Make space for absolute positioned action icons */
 }
 
 .item-text {
@@ -221,26 +221,54 @@ body {
   border-left: 3px solid #fbbf24;
 }
 
-.star-icon-left {
-  margin-right: 8px;
-  color: #fbbf24;
-  display: flex;
-  align-items: center;
-}
-
-.star-icon-right {
+.item-actions {
   position: absolute;
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  color: #fbbf24;
-  opacity: 0;
-  transition: opacity 0.2s;
   display: flex;
   align-items: center;
+  gap: 6px;
+  z-index: 2;
 }
 
-.list-item:hover .star-icon-right {
+.action-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 4px;
+  transition: opacity 0.2s, color 0.2s, transform 0.1s;
+}
+
+.action-icon:hover {
+  transform: scale(1.1);
+}
+
+.trash-icon {
+  color: #9ca3af;
+  opacity: 0;
+}
+
+.list-item:hover .trash-icon {
+  opacity: 1;
+}
+
+.trash-icon:hover {
+  color: #f87171;
+}
+
+.star-icon {
+  color: #fbbf24;
+  opacity: 0;
+}
+
+.star-icon.favorited {
+  opacity: 1;
+}
+
+.list-item:hover .star-icon {
   opacity: 1;
 }
 

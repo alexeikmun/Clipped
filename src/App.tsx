@@ -4,6 +4,13 @@ import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 import { ContentPreview } from "./components/ContentPreview";
 import { ImagePreview } from "./components/ImagePreview";
+import {
+  selectClipByNumber,
+  shouldHandleNumberKey,
+  getRestoredSelectedIndex,
+  persistSelectedClipId,
+  getPersistedSelectedClipId,
+} from "./utils/navigation";
 
 interface ClipItem {
   id: string;
@@ -40,6 +47,27 @@ const StarIcon = ({ filled, onClick, className }: { filled: boolean; onClick?: (
       strokeLinejoin="round"
     >
       <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon>
+    </svg>
+  </div>
+);
+
+const TrashIcon = ({ onClick, className }: { onClick?: (e: React.MouseEvent) => void; className?: string }) => (
+  <div className={className} onClick={onClick} title="Delete clip">
+    <svg 
+      xmlns="http://www.w3.org/2000/svg" 
+      width="16" 
+      height="16" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    >
+      <polyline points="3 6 5 6 21 6"></polyline>
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+      <line x1="10" y1="11" x2="10" y2="17"></line>
+      <line x1="14" y1="11" x2="14" y2="17"></line>
     </svg>
   </div>
 );
@@ -118,20 +146,24 @@ function App() {
     window.addEventListener("contextmenu", handleContextMenu);
 
     const isTauri = "__TAURI_INTERNALS__" in window;
+    const savedId = getPersistedSelectedClipId();
 
     if (!isTauri) {
       console.warn("Not running in Tauri environment. APIs disabled.");
-      setHistory([
+      const mockItems = [
         { id: "1", text: "Mock Item 1", is_favorite: false },
         { id: "2", text: "Mock Item 2", is_favorite: true },
         { id: "3", text: "Mock Item 3", is_favorite: false }
-      ]);
+      ];
+      setHistory(mockItems);
+      setSelectedIndex(getRestoredSelectedIndex(mockItems, savedId));
       return;
     }
 
     invoke<ClipItem[]>("get_history", { favoritesOnly: false }).then((items) => {
       if (items && items.length > 0) {
         setHistory(items);
+        setSelectedIndex(getRestoredSelectedIndex(items, savedId));
       }
     });
 
@@ -166,9 +198,14 @@ function App() {
         if (showFavorites && !newItem.is_favorite) {
           return withoutExisting;
         }
-        return [newItem, ...withoutExisting].slice(0, 999);
+        const updated = [newItem, ...withoutExisting].slice(0, 999);
+
+        // Always update selection to first position (1) on new entry
+        setSelectedIndex(0);
+        persistSelectedClipId(newItem.id);
+
+        return updated;
       });
-      setSelectedIndex(0);
     });
 
     const unlistenShortcutPromise = listen("shortcut-cycle-next", () => {
@@ -198,9 +235,12 @@ function App() {
       setIsSearchVisible(false);
       setSearchQuery("");
       setShowFavorites(false);
-      setSelectedIndex(0);
+      const savedClipId = getPersistedSelectedClipId();
       invoke<ClipItem[]>("get_history", { favoritesOnly: false }).then((items) => {
-        if (items) setHistory(items);
+        if (items) {
+          setHistory(items);
+          setSelectedIndex(getRestoredSelectedIndex(items, savedClipId));
+        }
       });
     });
 
@@ -218,6 +258,14 @@ function App() {
       setSelectedIndex(Math.max(0, filteredItems.length - 1));
     }
   }, [filteredItems.length, selectedIndex]);
+
+  // Persist selected clip ID
+  useEffect(() => {
+    const currentItem = filteredItems[selectedIndex]?.item;
+    if (currentItem) {
+      persistSelectedClipId(currentItem.id);
+    }
+  }, [selectedIndex, filteredItems]);
 
   // Focus input when search becomes visible
   useEffect(() => {
@@ -274,6 +322,20 @@ function App() {
     }
   };
 
+  // Delete clip
+  const deleteClip = async (id: string) => {
+    if ("__TAURI_INTERNALS__" in window) {
+      try {
+        await invoke<boolean>("delete_clip", { id });
+      } catch (e) {
+        console.error("Failed to delete clip:", e);
+        return;
+      }
+    }
+    setHistory(prev => prev.filter(item => item.id !== id));
+    setSelectedIndex(prev => (prev > 0 ? prev - 1 : 0));
+  };
+
   // Keyboard navigation handler
   const handleKeyDown = async (e: KeyboardEvent | React.KeyboardEvent) => {
     const { filteredItems, selectedIndex, isSearchVisible, showSettings, searchQuery } = stateRef.current;
@@ -287,6 +349,33 @@ function App() {
       return;
     }
 
+    const activeTag = document.activeElement?.tagName.toLowerCase();
+    const isInputFocused = activeTag === "input" || activeTag === "textarea";
+
+    // 1-9 Number key navigation
+    if (shouldHandleNumberKey(e, isInputFocused)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const targetIndex = selectClipByNumber(e.key, filteredItems.length);
+      if (targetIndex !== null) {
+        setSelectedIndex(targetIndex);
+      }
+      return;
+    }
+
+    // Delete key to remove clip
+    if (e.key === "Delete" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (!isInputFocused || !searchQuery) {
+        e.preventDefault();
+        e.stopPropagation();
+        const currentItem = filteredItems[selectedIndex]?.item;
+        if (currentItem) {
+          deleteClip(currentItem.id);
+        }
+        return;
+      }
+    }
+
     if (e.key === "Tab") {
       e.preventDefault();
       e.stopPropagation();
@@ -294,6 +383,7 @@ function App() {
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       e.stopPropagation();
+      inputRef.current?.blur();
       setSelectedIndex((prev) => {
         const nextIndex = prev + 1;
         if (nextIndex >= filteredItems.length) return 0;
@@ -302,6 +392,7 @@ function App() {
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       e.stopPropagation();
+      inputRef.current?.blur();
       setSelectedIndex((prev) => {
         const nextIndex = prev - 1;
         if (nextIndex < 0) return filteredItems.length - 1;
@@ -363,7 +454,7 @@ function App() {
       setSelectedIndex(0);
     } else if (
       isSearchVisible &&
-      (e.key === "Backspace" || e.key === "Delete") &&
+      e.key === "Backspace" &&
       !searchQuery
     ) {
       e.preventDefault();
@@ -378,21 +469,6 @@ function App() {
       inputRef.current?.focus();
       setSearchQuery((prev) => {
         const next = prev.slice(0, -1);
-        if (!next) {
-          setIsSearchVisible(false);
-        }
-        return next;
-      });
-      setSelectedIndex(0);
-    } else if (
-      isSearchVisible &&
-      document.activeElement !== inputRef.current &&
-      e.key === "Delete"
-    ) {
-      e.preventDefault();
-      inputRef.current?.focus();
-      setSearchQuery((prev) => {
-        const next = prev.slice(1);
         if (!next) {
           setIsSearchVisible(false);
         }
@@ -470,62 +546,61 @@ function App() {
     return parts.length > 0 && !isModifier ? parts.join("+") : "";
   };
 
-  const renderItem = (item: ClipItem, index: number) => (
-    <div 
-      key={item.id}
-      className={`list-item ${index === selectedIndex ? 'selected' : ''} ${item.is_favorite ? 'favorited' : ''}`}
-      onClick={() => {
-        setSelectedIndex(index);
-        if (isSearchVisible) {
-          inputRef.current?.focus();
-        }
-      }}
-    >
-      {item.is_favorite && (
-        <StarIcon 
-          filled={true} 
-          className="star-icon-left" 
-          onClick={(e) => { 
-            e.stopPropagation(); 
-            toggleFavorite(item.id); 
-            if (isSearchVisible) {
-              inputRef.current?.focus();
-            }
-          }} 
-        />
-      )}
+  const renderItem = (item?: ClipItem, index: number = 0) => {
+    if (!item) return null;
+    return (
+      <div 
+        key={item.id}
+        className={`list-item ${index === selectedIndex ? 'selected' : ''} ${item.is_favorite ? 'favorited' : ''}`}
+        onClick={() => {
+          setSelectedIndex(index);
+          if (isSearchVisible) {
+            inputRef.current?.focus();
+          }
+        }}
+      >
+        <div className="item-text">
+          {item.clip_type === "image" ? (
+            <ImagePreview
+              imagePath={item.image_path}
+              width={item.image_width}
+              height={item.image_height}
+              text={item.text}
+              ocrText={item.ocr_text}
+              query={searchQuery}
+              isCompact={isSearchVisible}
+            />
+          ) : (
+            <ContentPreview text={item.text} query={searchQuery} />
+          )}
+        </div>
 
-      <div className="item-text">
-        {item.clip_type === "image" ? (
-          <ImagePreview
-            imagePath={item.image_path}
-            width={item.image_width}
-            height={item.image_height}
-            text={item.text}
-            ocrText={item.ocr_text}
-            query={searchQuery}
-            isCompact={isSearchVisible}
+        <div className="item-actions">
+          <TrashIcon 
+            className="action-icon trash-icon"
+            onClick={(e) => { 
+              e.stopPropagation(); 
+              deleteClip(item.id); 
+              if (isSearchVisible) {
+                inputRef.current?.focus();
+              }
+            }} 
           />
-        ) : (
-          <ContentPreview text={item.text} query={searchQuery} />
-        )}
+          <StarIcon 
+            filled={item.is_favorite} 
+            className={`action-icon star-icon ${item.is_favorite ? 'favorited' : ''}`}
+            onClick={(e) => { 
+              e.stopPropagation(); 
+              toggleFavorite(item.id); 
+              if (isSearchVisible) {
+                inputRef.current?.focus();
+              }
+            }} 
+          />
+        </div>
       </div>
-
-      {!item.is_favorite && (
-        <StarIcon 
-          filled={false} 
-          className="star-icon-right" 
-          onClick={(e) => { 
-            e.stopPropagation(); 
-            toggleFavorite(item.id); 
-            if (isSearchVisible) {
-              inputRef.current?.focus();
-            }
-          }} 
-        />
-      )}
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="app">
@@ -587,7 +662,7 @@ function App() {
                   }
                 }}
                 onKeyDown={(e) => {
-                  if ((e.key === "Backspace" || e.key === "Delete") && !searchQuery) {
+                  if (e.key === "Backspace" && !searchQuery) {
                     e.preventDefault();
                     setIsSearchVisible(false);
                     setSelectedIndex(0);
@@ -640,7 +715,7 @@ function App() {
               (searchQuery || showFavorites) ? (
                 filteredItems.map((result, index) => renderItem(result.item, index))
               ) : (
-                renderItem(filteredItems[selectedIndex]?.item, selectedIndex)
+                renderItem(filteredItems[selectedIndex]?.item || filteredItems[0]?.item, selectedIndex)
               )
             ) : (
               <div style={{ padding: '20px', textAlign: 'center', color: '#888' }}>

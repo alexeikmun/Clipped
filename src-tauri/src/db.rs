@@ -646,6 +646,18 @@ impl Database {
         }
     }
 
+    /// Deletes a clip entirely from the database and returns its image path if it was an image clip
+    pub fn delete_clip(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.writer_conn.lock().unwrap();
+        let img_path: Option<String> = {
+            let mut stmt = conn.prepare("SELECT image_path FROM clips WHERE id = ?1")?;
+            stmt.query_row(params![id], |r| r.get(0)).optional()?.flatten()
+        };
+
+        conn.execute("DELETE FROM clips WHERE id = ?1", params![id])?;
+        Ok(img_path)
+    }
+
     pub fn prune_history(&self, max_items: usize) -> Result<Vec<String>> {
         let conn = self.writer_conn.lock().unwrap();
         let total_count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
@@ -899,6 +911,51 @@ mod tests {
 
         let item = db.save_or_bump_text("Migrated test".into(), "hash123").unwrap();
         assert_eq!(item.text, "Migrated test");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_delete_clip() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).expect("init db");
+
+        // 1. Insert text clip
+        let item1 = db.save_or_bump_text("Delete me text".into(), "hash_del_1").unwrap();
+        assert_eq!(db.get_history(10, false).unwrap().len(), 1);
+
+        // Verify FTS search finds it
+        assert_eq!(db.search_clips("Delete", false, 10).unwrap().len(), 1);
+
+        // Delete clip
+        let img_path = db.delete_clip(&item1.id).unwrap();
+        assert!(img_path.is_none());
+
+        // Assert gone from history and FTS
+        assert_eq!(db.get_history(10, false).unwrap().len(), 0);
+        assert_eq!(db.search_clips("Delete", false, 10).unwrap().len(), 0);
+
+        // 2. Insert image clip
+        let img_clip = ClipItem {
+            id: "del_img_1".into(),
+            text: "[Image]".into(),
+            is_favorite: false,
+            clip_type: "image".into(),
+            image_path: Some("images/test_del.png".into()),
+            image_width: Some(200),
+            image_height: Some(200),
+            ocr_text: Some("Receipt total $50".into()),
+            full_text_len: 0,
+        };
+        db.insert_image_clip(&img_clip, "hash_del_img").unwrap();
+        assert_eq!(db.search_clips("Receipt", false, 10).unwrap().len(), 1);
+
+        // Delete image clip
+        let deleted_img = db.delete_clip(&img_clip.id).unwrap();
+        assert_eq!(deleted_img, Some("images/test_del.png".into()));
+
+        // Assert gone from FTS
+        assert_eq!(db.search_clips("Receipt", false, 10).unwrap().len(), 0);
 
         let _ = fs::remove_dir_all(&dir);
     }
