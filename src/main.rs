@@ -147,8 +147,8 @@ fn center_and_focus_window(window: &MainWindow) {
 
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let win_w = 620;
-    let win_h = 420;
+    let win_w = 480;
+    let win_h = 360;
     let x = (screen_w - win_w) / 2;
     let y = (screen_h - win_h) / 2;
 
@@ -168,6 +168,38 @@ fn center_and_focus_window(window: &MainWindow) {
             CACHED_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
             let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_TOOLWINDOW.0 as i32);
+
+            use windows::Win32::Graphics::Dwm::{
+                DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+                DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+                DWMWCP_ROUND,
+            };
+            use windows::Win32::UI::Controls::MARGINS;
+
+            let margins = MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+
+            let dark_mode = windows::Win32::Foundation::TRUE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &dark_mode as *const _ as _,
+                std::mem::size_of_val(&dark_mode) as u32,
+            );
+
+            let corner = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                &corner as *const _ as _,
+                std::mem::size_of_val(&corner) as u32,
+            );
+
             let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, win_w, win_h, SWP_SHOWWINDOW);
             let _ = SetForegroundWindow(hwnd);
         }

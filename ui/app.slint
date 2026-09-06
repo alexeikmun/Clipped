@@ -16,9 +16,9 @@ export component MainWindow inherits Window {
     title: "Clipped";
     no-frame: true;
     background: transparent;
-    preferred-width: 620px;
-    preferred-height: 420px;
-    default-font-family: "Segoe UI, system-ui, sans-serif";
+    preferred-width: 480px;
+    preferred-height: 360px;
+    default-font-family: "Segoe UI, -apple-system, system-ui, sans-serif";
 
     in-out property <[ClipData]> clips: [];
     in-out property <int> selected_index: 0;
@@ -129,40 +129,46 @@ export component MainWindow inherits Window {
         card := Rectangle {
             width: 100%;
             height: 100%;
-            background: #1e1e2ecc;
+            background: #1e1e2ef0;
             border-radius: 20px;
+            border-width: 1px;
+            border-color: #ffffff14;
             clip: true;
 
             VerticalLayout {
-                padding: 20px;
-                spacing: 15px;
+                padding-top: 14px;
+                padding-bottom: 16px;
+                padding-left: 18px;
+                padding-right: 18px;
+                spacing: 12px;
 
                 // Header
                 header := HorizontalLayout {
                     alignment: center;
-                    spacing: 10px;
-                    height: 32px;
+                    spacing: 12px;
+                    height: 28px;
 
                     if root.show_settings : Text {
                         text: "Settings";
                         font-size: 15px;
                         font-weight: 600;
-                        color: #cccccc;
+                        color: #e2e8f0;
                         vertical-alignment: center;
                     }
 
                     if !root.show_settings : Rectangle {
-                        width: 40px;
-                        height: 28px;
+                        width: 44px;
+                        height: 26px;
                         background: #0000004d;
-                        border-radius: 12px;
+                        border-radius: 13px;
                         border-width: 1px;
-                        border-color: #ffffff0d;
+                        border-color: #ffffff14;
 
                         Text {
                             text: (root.clips.length > 0) ? (root.selected_index + 1) : 0;
-                            color: #cccccc;
-                            font-size: 14px;
+                            color: #cbd5e1;
+                            font-size: 13px;
+                            font-weight: 600;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
@@ -170,18 +176,19 @@ export component MainWindow inherits Window {
 
                     if !root.show_settings : fav_toggle := Rectangle {
                         width: 28px;
-                        height: 28px;
+                        height: 26px;
                         border-radius: 6px;
+                        background: fav_touch.has-hover ? #ffffff0f : #00000000;
 
-                        Text {
-                            text: root.show_favorites ? "★" : "☆";
-                            font-size: 18px;
-                            color: root.show_favorites ? #fbbf24 : #cccccc;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Image {
+                            source: root.show_favorites ? @image-url("../assets/star-active.svg") : @image-url("../assets/star.svg");
+                            width: 18px;
+                            height: 18px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
                         }
 
-                        TouchArea {
+                        fav_touch := TouchArea {
                             clicked => {
                                 root.toggle_favorites_filter();
                             }
@@ -415,10 +422,9 @@ export component MainWindow inherits Window {
                             // Text clip
                             if root.clips[root.selected_index].clip_type != "image" : Text {
                                 text: root.clips[root.selected_index].text;
-                                color: #eeeeee;
-                                font-size: 13px;
+                                color: #f8fafc;
+                                font-size: 14px;
                                 wrap: word-wrap;
-                                font-family: "Consolas, 'Cascadia Code', monospace";
                             }
                         }
                     }
@@ -453,23 +459,24 @@ export component MainWindow inherits Window {
                                 }
 
                                 HorizontalLayout {
-                                    padding-left: 12px;
-                                    padding-right: 12px;
-                                    alignment: space-between;
+                                    padding-left: 14px;
+                                    padding-right: 14px;
+                                    spacing: 8px;
+                                    alignment: center;
 
                                     Text {
                                         text: clip.text;
-                                        color: #e2e8f0;
-                                        font-size: 12px;
+                                        color: (idx == root.selected_index) ? #ffffff : #cbd5e1;
+                                        font-size: 13px;
                                         overflow: elide;
                                         vertical-alignment: center;
-                                        font-family: "Consolas, 'Cascadia Code', monospace";
+                                        horizontal-stretch: 1;
                                     }
 
-                                    if clip.is_favorite : Text {
-                                        text: "★";
-                                        color: #fbbf24;
-                                        font-size: 14px;
+                                    if clip.is_favorite : Image {
+                                        source: @image-url("../assets/star-active.svg");
+                                        width: 14px;
+                                        height: 14px;
                                         vertical-alignment: center;
                                     }
                                 }
@@ -479,19 +486,19 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Bottom-Center Action Dock (Only visible when hovering content or dock)
+            // Bottom-Center Action Dock
             if !root.show_settings && root.clips.length > 0 : action_dock := Rectangle {
                 x: (parent.width - self.width) / 2;
-                y: parent.height - self.height - 28px;
-                width: 76px;
+                y: parent.height - self.height - 18px;
+                width: 78px;
                 height: 30px;
                 border-radius: 15px;
-                background: #12121ebd;
+                background: #12121eeb;
                 border-width: 1px;
-                border-color: #ffffff1f;
-                opacity: (content_touch.has-hover || dock_touch.has-hover) ? 1.0 : 0.0;
+                border-color: #ffffff26;
+                opacity: (content_touch.has-hover || dock_touch.has-hover) ? 1.0 : 0.85;
 
-                animate opacity { duration: 180ms; easing: ease-out; }
+                animate opacity { duration: 150ms; easing: ease-out; }
 
                 dock_touch := TouchArea {}
 
@@ -505,12 +512,12 @@ export component MainWindow inherits Window {
                         border-radius: 4px;
                         background: trash_touch.has-hover ? #f8717126 : #00000000;
 
-                        Text {
-                            text: "🗑";
-                            font-size: 13px;
-                            color: trash_touch.has-hover ? #f87171 : #9ca3af;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Image {
+                            source: trash_touch.has-hover ? @image-url("../assets/trash-hover.svg") : @image-url("../assets/trash.svg");
+                            width: 15px;
+                            height: 15px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
                         }
 
                         trash_touch := TouchArea {
@@ -535,12 +542,14 @@ export component MainWindow inherits Window {
                         border-radius: 4px;
                         background: star_touch.has-hover ? #fbbf2426 : #00000000;
 
-                        Text {
-                            text: (root.clips.length > 0 && root.selected_index >= 0 && root.selected_index < root.clips.length && root.clips[root.selected_index].is_favorite) ? "★" : "☆";
-                            font-size: 14px;
-                            color: (root.clips.length > 0 && root.selected_index >= 0 && root.selected_index < root.clips.length && root.clips[root.selected_index].is_favorite) ? #fbbf24 : (star_touch.has-hover ? #fbbf24 : #9ca3af);
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                        Image {
+                            source: (root.clips.length > 0 && root.selected_index >= 0 && root.selected_index < root.clips.length && root.clips[root.selected_index].is_favorite)
+                                ? @image-url("../assets/star-active.svg")
+                                : @image-url("../assets/star.svg");
+                            width: 15px;
+                            height: 15px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
                         }
 
                         star_touch := TouchArea {
