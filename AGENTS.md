@@ -4,8 +4,9 @@ Instructions and guidelines for AI agents working in the Clipped repository.
 
 ## Project Overview
 
-Clipped is a lightweight, cross-platform desktop clipboard manager built with **Tauri 2.0** (Rust) and **React 19 + TypeScript** (Vite).
+Clipped is an ultra-lightweight, pure native desktop clipboard manager built with **Rust 2021** and **Slint 1.9** (zero Chromium / zero WebView2).
 
+- **RAM Footprint**: ~10 MB private memory (reduced from ~138 MB).
 - **Global Hotkey**: `Ctrl+Alt+Shift+.` (configurable in settings).
 - **Behavior**: Opens centered floating modal, tracks clipboard history in background thread, smart-truncates oldest non-favorites (max 999), allows searching and direct pasting into active apps via simulated keystrokes.
 
@@ -13,97 +14,67 @@ Clipped is a lightweight, cross-platform desktop clipboard manager built with **
 
 ## Tooling & Package Management
 
-- **Package Manager**: Always use `pnpm`. Never use `npm` or `yarn`.
-- **Node Version**: 18+ LTS.
+- **Build Tool**: Pure `cargo`. No Node.js, npm, or pnpm dependencies.
 - **Rust Toolchain**: 2021 edition.
 
 ### Common Commands
 
 ```bash
-# Install frontend dependencies
-pnpm install
+# Verify Rust compilation
+cargo check
 
-# Run frontend development server
-pnpm run dev
+# Run tests
+cargo test
 
-# Run Tauri desktop app in dev mode
-pnpm tauri dev
+# Run native desktop app in dev mode
+cargo run
 
-# Typecheck and build frontend
-pnpm run build
-
-# Verify Rust backend compilation
-cargo check --manifest-path src-tauri/Cargo.toml
-
-# Build release installer (bundles NSIS installer and copies to releases/download/)
-pnpm run build:release
-
-# Update Rust dependencies
-cargo update --manifest-path src-tauri/Cargo.toml
+# Build optimized release binary (target/release/clipped.exe)
+cargo build --release
 ```
 
 ---
 
 ## Technology Stack
 
-### Frontend
-- **Framework**: React 19, TypeScript 7.x, Vite 8.x.
-- **Styling**: Vanilla CSS (`src/App.css`) with CSS custom properties (`--bg-app`, `--accent`, etc.). No Tailwind or CSS-in-JS.
-- **State Management**: Native React hooks (`useState`, `useEffect`, `useRef`, `useMemo`). No Redux or Zustand.
-- **Syntax Highlighting**: `react-syntax-highlighter/dist/esm/prism-light` (`PrismLight`). Only register required languages (`json`, `bash`, `typescript`) to avoid bundle bloat.
+### Native GUI
+- **Framework**: Slint 1.9 (`ui/app.slint` compiled via `build.rs`).
+- **Renderer**: `winit-software` / `femtovg` (ultra-low ~10 MB RAM footprint).
 
-### Backend (Rust / Tauri 2.0)
-- `tauri` (v2, feature: `tray-icon`)
-- `tauri-plugin-global-shortcut`: Global hotkey registration.
-- `tauri-plugin-autostart`: Launch on system boot.
-- `tauri-plugin-opener`: Open URLs / external paths.
-- `tauri-plugin-clipboard-manager`: Tauri clipboard APIs.
-- `arboard`: Fast native clipboard read/write.
-- `enigo`: Simulates `Ctrl+V` (or `Cmd+V` on macOS) to paste text into target windows.
-- `serde` / `serde_json`: Serialization for settings and history.
-- `uuid`: Clip ID generation.
+### Backend (Pure Rust)
+- `global-hotkey`: Standalone native global hotkey registration (`0.6`).
+- `tray-icon` + `muda`: Native Windows system tray icon and context menu.
+- `arboard`: Fast native clipboard read/write (`3.6`).
+- `enigo`: Simulates keystrokes (`Ctrl+V`) for target app pasting (`0.6`).
+- `rusqlite`: SQLite storage with WAL mode, FTS5 full-text search, and LRU bumping.
+- `windows`: Windows Media OCR and Win32 window management.
+- `uuid` / `xxhash-rust`: Fast hashing and unique clip ID generation.
 
 ---
 
 ## Key Architecture & Patterns
 
-### 1. Tauri IPC & Capabilities
-- Rust commands are declared in `src-tauri/src/lib.rs` and registered in `tauri::generate_handler![]`.
-- All exposed commands and capabilities must be declared in `src-tauri/capabilities/default.json`.
-- Event flow:
-  - Rust emits: `window.emit("event-name", payload)`
-  - React listens: `const unlisten = await listen("event-name", handler)`
-  - Always clean up event listeners on unmount (`unlisten()`).
-
-### 2. State Synchronization & Stale Closures
-- To prevent stale closures in global `window` event listeners and Tauri event callbacks, maintain `stateRef`:
-  ```tsx
-  const stateRef = useRef({ ...stateValues });
-  stateRef.current = { ...stateValues };
-  ```
-- Listeners should read mutable values directly from `stateRef.current`.
-
-### 3. Modal & Keyboard Flow
-- **Auto-hide on blur**: Handled in Rust via `WindowEvent::Focused(false)` (clicking outside hides the modal).
+### 1. Slint Declarative UI & Event Loop
+- GUI defined in `ui/app.slint` and compiled at build-time via `build.rs` into native Rust code.
+- Data binding via `slint::ModelRc<ClipData>` and `slint::VecModel`.
+- Thread synchronization: Background threads use `window_weak.upgrade_in_event_loop(...)` to safely update UI state.
+- Main timer loop (40ms) drains `GlobalHotKeyEvent`, `TrayIconEvent`, and `MenuEvent`, and checks foreground window focus for auto-hide.
+### 2. Modal & Keyboard Flow
+- **Auto-hide on blur**: Handled via Win32 `GetForegroundWindow()` polling check in 40ms timer loop (clicking outside hides modal).
 - **Search input toggle**:
-  - Starts hidden (`isSearchVisible: false`).
-  - Typing any printable character sets `isSearchVisible: true`, enters the character, and focuses the input via `useEffect([isSearchVisible])`.
-  - Deleting all text via Backspace/Delete sets `isSearchVisible: false` and returns to single card view.
+  - Starts hidden (`is_search_visible: false`).
+  - Typing any printable character sets `is_search_visible: true`, enters character, and focuses `search_input`.
+  - Deleting all text sets `is_search_visible: false` and returns to single card view.
 - **Escape Key**:
   - 1st press: Clears search query and hides search input.
-  - 2nd press: Hides window via `hide_app` invoke.
+  - 2nd press: Hides window.
 - **Enter Key**:
-  - Invokes `paste_item`, hides window, pastes via `enigo`.
-
-### 4. Build & Release Scripts
-- `scripts/copy-release.js` copies newly generated `.exe` installers from `src-tauri/target/release/bundle/nsis/` to `releases/download/`.
-- It filters strictly by `_${currentVersion}_` read from `package.json` to avoid copying stale builds.
-- `pnpm-workspace.yaml` approves `esbuild` build scripts for pnpm 12.
+  - Hides window, pastes selected item via `enigo`.
 
 ---
 
 ## Code Quality Rules
 
-1. **Verify both sides after changes**: Always run `pnpm run build` and `cargo check --manifest-path src-tauri/Cargo.toml`.
-2. **Keep bundle lean**: Do not import full syntax highlighter packages or unnecessary npm libraries. Keep bundle under 500 kB.
-3. **No lockfile drift**: Never run `npm install` or generate `package-lock.json`.
+1. **Verify Rust build and tests**: Always run `cargo check` and `cargo test`.
+2. **Keep RAM lean**: Ensure `winit-software` renderer stays default to keep private memory ~10 MB.
+3. **No npm/Node drift**: Project is pure Rust, do not generate `package.json` or `node_modules`.
