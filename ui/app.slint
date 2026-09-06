@@ -24,6 +24,7 @@ export component MainWindow inherits Window {
     in-out property <int> selected_index: 0;
     in-out property <bool> show_favorites: false;
     in-out property <bool> is_search_visible: false;
+    in-out property <bool> search_enabled: false;
     in-out property <string> search_query: "";
     in-out property <bool> show_settings: false;
     in-out property <string> shortcut_input: "Ctrl+Alt+Shift+.";
@@ -118,8 +119,9 @@ export component MainWindow inherits Window {
             }
 
             // Typing printable character triggers search
-            if (!root.show_settings && !root.is_search_visible) {
-                if (event.text != "" && event.text != Key.Escape && event.text != Key.Return && 
+            if (!root.show_settings && !root.is_search_visible && root.search_enabled) {
+                if (!event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta &&
+                    event.text != "" && event.text != Key.Escape && event.text != Key.Return && 
                     event.text != Key.Delete && event.text != Key.Backspace &&
                     event.text != Key.UpArrow && event.text != Key.DownArrow &&
                     event.text != Key.LeftArrow && event.text != Key.RightArrow &&
@@ -229,8 +231,12 @@ export component MainWindow inherits Window {
                             }
                             key-pressed(event) => {
                                 if (event.text == Key.Escape) {
-                                    root.search_closed();
-                                    main-scope.focus();
+                                    if (root.search_query != "") {
+                                        root.search_closed();
+                                        main-scope.focus();
+                                    } else {
+                                        root.hide_requested();
+                                    }
                                     return accept;
                                 }
                                 if (event.text == Key.Return) {

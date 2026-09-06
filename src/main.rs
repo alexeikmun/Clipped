@@ -435,6 +435,9 @@ fn main() {
     let show_on_startup = (cfg!(debug_assertions) || std::env::args().any(|arg| arg == "--show" || arg == "-s")) && !is_hidden_flag;
     if show_on_startup {
         is_monitoring.store(false, Ordering::Relaxed);
+        main_window.set_is_search_visible(false);
+        main_window.set_search_query("".into());
+        main_window.set_search_enabled(false);
         center_and_focus_window(&main_window);
         main_window.invoke_focus_main();
     }
@@ -753,6 +756,9 @@ fn main() {
         let is_monitoring_c = is_monitoring.clone();
         main_window.on_hide_requested(move || {
             if let Some(w) = window_weak.upgrade() {
+                w.set_is_search_visible(false);
+                w.set_search_query("".into());
+                w.set_search_enabled(false);
                 let _ = w.hide();
                 is_monitoring_c.store(true, Ordering::Relaxed);
             }
@@ -837,9 +843,18 @@ fn main() {
     let cached_clips_timer = cached_clips.clone();
     let is_monitoring_timer = is_monitoring.clone();
     let mut ignore_blur_counter: u32 = if show_on_startup { 12 } else { 0 };
+    let mut search_enable_counter: u32 = if show_on_startup { 6 } else { 0 };
 
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(40), move || {
         let Some(w) = window_weak.upgrade() else { return; };
+
+        // Enable search after hotkey release window
+        if search_enable_counter > 0 {
+            search_enable_counter -= 1;
+            if search_enable_counter == 0 {
+                w.set_search_enabled(true);
+            }
+        }
 
         // A. Drain Global HotKey Events
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
@@ -871,6 +886,8 @@ fn main() {
                     w.set_is_search_visible(false);
                     w.set_search_query("".into());
                     w.set_show_favorites(false);
+                    w.set_search_enabled(false);
+                    search_enable_counter = 6;
 
                     let updated = reload_clips(&w, &db_timer, &data_dir_timer, false, "", Some(0));
                     *cached_clips_timer.lock().unwrap() = updated;
@@ -897,6 +914,10 @@ fn main() {
 
                 is_monitoring_timer.store(false, Ordering::Relaxed);
                 w.set_show_settings(true);
+                w.set_is_search_visible(false);
+                w.set_search_query("".into());
+                w.set_search_enabled(false);
+                search_enable_counter = 6;
                 center_and_focus_window(&w);
                 w.invoke_focus_main();
                 ignore_blur_counter = 12;
@@ -916,6 +937,9 @@ fn main() {
             if ignore_blur_counter > 0 {
                 ignore_blur_counter -= 1;
             } else if !is_window_foreground() {
+                w.set_is_search_visible(false);
+                w.set_search_query("".into());
+                w.set_search_enabled(false);
                 let _ = w.hide();
                 is_monitoring_timer.store(true, Ordering::Relaxed);
             }
