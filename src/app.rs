@@ -51,6 +51,8 @@ pub struct AppState {
     pub is_monitoring: Arc<AtomicBool>,
     pub previous_foreground: AtomicIsize,
     pub dpi_scale: f32,
+    pub app_icon_big: HICON,
+    pub app_icon_sm: HICON,
     pub nid: NOTIFYICONDATAW,
     pub _hotkey_id: i32,
     pub last_text_hash: u128,
@@ -71,6 +73,8 @@ impl AppState {
             is_monitoring: Arc::new(AtomicBool::new(true)),
             previous_foreground: AtomicIsize::new(0),
             dpi_scale: 1.0,
+            app_icon_big: HICON::default(),
+            app_icon_sm: HICON::default(),
             nid: NOTIFYICONDATAW::default(),
             _hotkey_id: HOTKEY_ID,
             last_text_hash: 0,
@@ -350,21 +354,26 @@ pub fn run_app() -> windows::core::Result<()> {
         // Register window class
         let class_name = w!("ClippedWindowClass");
         let h_instance = GetModuleHandleW(None)?;
-        let app_icon = load_app_icon(h_instance.into());
+        let app_icon_big = load_app_icon(h_instance.into(), false);
+        let app_icon_sm = load_app_icon(h_instance.into(), true);
 
         let wnd_class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wnd_proc),
             hInstance: h_instance.into(),
-            hIcon: app_icon,
-            hIconSm: app_icon,
+            hIcon: app_icon_big,
+            hIconSm: app_icon_sm,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
             lpszClassName: class_name,
             ..Default::default()
         };
         RegisterClassExW(&wnd_class);
+
+        let mut app_state = app_state;
+        app_state.app_icon_big = app_icon_big;
+        app_state.app_icon_sm = app_icon_sm;
 
         let state_box = Box::new(app_state);
         let state_ptr = Box::into_raw(state_box);
@@ -387,8 +396,9 @@ pub fn run_app() -> windows::core::Result<()> {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
         (*state_ptr).hwnd = hwnd;
 
-        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(app_icon.0 as isize));
-        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(app_icon.0 as isize));
+        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(app_icon_big.0 as isize));
+        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(app_icon_sm.0 as isize));
+        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(2 /* ICON_SMALL2 */), LPARAM(app_icon_sm.0 as isize));
 
         // Apply DWM attributes (rounded corners & dark theme)
         let corner_pref = DWMWCP_ROUND;
@@ -422,7 +432,7 @@ pub fn run_app() -> windows::core::Result<()> {
             uID: 1,
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage: WM_TRAYICON,
-            hIcon: app_icon,
+            hIcon: app_icon_sm,
             szTip: tip,
             ..Default::default()
         };
@@ -481,6 +491,14 @@ unsafe extern "system" fn wnd_proc(
     let state = &mut *state_ptr;
 
     match msg {
+        WM_GETICON => {
+            let icon = match wparam.0 as u32 {
+                ICON_BIG => state.app_icon_big,
+                _ => state.app_icon_sm,
+            };
+            LRESULT(icon.0 as isize)
+        }
+
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let _ = BeginPaint(hwnd, &mut ps);
@@ -906,15 +924,21 @@ fn save_image_fast_png(
     Ok(())
 }
 
-unsafe fn load_app_icon(h_instance: HINSTANCE) -> HICON {
+unsafe fn load_app_icon(h_instance: HINSTANCE, sm: bool) -> HICON {
+    let (cx, cy) = if sm {
+        (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON))
+    } else {
+        (GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON))
+    };
+
     // 1. Try loading from compiled PE resource (resource ID 1 embedded via winres)
     if let Ok(handle) = LoadImageW(
         h_instance,
         PCWSTR(1 as *const u16),
         IMAGE_ICON,
-        0,
-        0,
-        LR_DEFAULTSIZE | LR_SHARED,
+        cx,
+        cy,
+        LR_SHARED,
     ) {
         let hicon = HICON(handle.0);
         if !hicon.is_invalid() {
@@ -947,9 +971,9 @@ unsafe fn load_app_icon(h_instance: HINSTANCE) -> HICON {
                 None,
                 PCWSTR(wide.as_ptr()),
                 IMAGE_ICON,
-                0,
-                0,
-                LR_LOADFROMFILE | LR_DEFAULTSIZE,
+                cx,
+                cy,
+                LR_LOADFROMFILE | LR_SHARED,
             ) {
                 let hicon = HICON(handle.0);
                 if !hicon.is_invalid() {
