@@ -138,39 +138,44 @@ static CACHED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIs
 static PREVIOUS_FOREGROUND_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 #[cfg(target_os = "windows")]
-fn center_and_focus_window(window: &MainWindow) {
-    use windows::core::HSTRING;
-    use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::Graphics::Gdi::{
-        RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE, RDW_UPDATENOW,
+static CONFIGURED_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Applies the frameless dark styling to the native window.
+///
+/// The dark-mode, rounded-corner and tool-window attributes are set once per handle: they
+/// are sticky, and re-issuing the `SWP_FRAMECHANGED` round trip on every show would race
+/// the first paint of the window that was just made visible. Only the sizing-border strip
+/// is re-asserted each time, and a frame recalculation is requested only when something
+/// actually changed.
+#[cfg(target_os = "windows")]
+fn apply_window_attributes(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+        DWMWCP_ROUND,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetSystemMetrics, GetWindowLongW, GetWindowRect, SetForegroundWindow,
-        SetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-        SWP_FRAMECHANGED, SWP_NOSIZE, SWP_SHOWWINDOW, WS_EX_TOOLWINDOW,
+        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST,
+        SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
     };
-    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 
-    let _ = window.show();
+    let first_time = CONFIGURED_HWND.load(Ordering::Relaxed) != hwnd.0 as isize;
+    let mut frame_dirty = false;
 
     unsafe {
-        let cached = CACHED_HWND.load(Ordering::Relaxed);
-        let hwnd = if cached != 0 {
-            HWND(cached as _)
-        } else {
-            let title = HSTRING::from("Clipped");
-            FindWindowW(None, &title).unwrap_or(HWND(std::ptr::null_mut()))
-        };
+        // The root element takes its size from the backend instead of pinning it, so winit
+        // treats the window as resizable and keeps a sizing border on it. Drop that border to
+        // hold the modal at its design size without constraining the Slint layout; winit
+        // restores it whenever it re-applies the constraints, hence the check on every show.
+        let style = GetWindowLongW(hwnd, GWL_STYLE);
+        if style & (WS_THICKFRAME.0 as i32) != 0 {
+            SetWindowLongW(hwnd, GWL_STYLE, style & !(WS_THICKFRAME.0 as i32));
+            frame_dirty = true;
+        }
 
-        if !hwnd.0.is_null() {
-            CACHED_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        if first_time {
             let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE);
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_TOOLWINDOW.0 as i32);
-
-            use windows::Win32::Graphics::Dwm::{
-                DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
-                DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-            };
+            frame_dirty = true;
 
             let dark_mode = windows::Win32::Foundation::TRUE;
             let _ = DwmSetWindowAttribute(
@@ -187,22 +192,98 @@ fn center_and_focus_window(window: &MainWindow) {
                 &corner as *const _ as _,
                 std::mem::size_of_val(&corner) as u32,
             );
+        }
 
-            let mut wr = RECT::default();
-            let _ = GetWindowRect(hwnd, &mut wr);
-            let win_w = wr.right - wr.left;
-            let win_h = wr.bottom - wr.top;
-            let screen_w = GetSystemMetrics(SM_CXSCREEN);
-            let screen_h = GetSystemMetrics(SM_CYSCREEN);
-            let x = (screen_w - win_w) / 2;
-            let y = (screen_h - win_h) / 2;
-
-            let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-            let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_FRAME | RDW_ALLCHILDREN);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = SetFocus(hwnd);
+        if frame_dirty {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
+            );
         }
     }
+
+    CONFIGURED_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "windows")]
+fn sync_surface_to_client_rect(window: &MainWindow, hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
+        return false;
+    }
+
+    let client_w = (client.right - client.left).max(0) as u32;
+    let client_h = (client.bottom - client.top).max(0) as u32;
+    if client_w == 0 || client_h == 0 {
+        return false;
+    }
+
+    let surface = window.window().size();
+    if surface.width == client_w && surface.height == client_h {
+        return false;
+    }
+
+    window
+        .window()
+        .set_size(slint::PhysicalSize::new(client_w, client_h));
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn center_and_focus_window(window: &MainWindow) {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{RedrawWindow, RDW_ALLCHILDREN, RDW_FRAME, RDW_INVALIDATE};
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetSystemMetrics, GetWindowRect, SetForegroundWindow, SetWindowPos,
+        HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN, SWP_NOSIZE, SWP_SHOWWINDOW,
+    };
+
+    let _ = window.show();
+
+    unsafe {
+        let cached = CACHED_HWND.load(Ordering::Relaxed);
+        let hwnd = if cached != 0 {
+            HWND(cached as _)
+        } else {
+            let title = HSTRING::from("Clipped");
+            FindWindowW(None, &title).unwrap_or(HWND(std::ptr::null_mut()))
+        };
+
+        if hwnd.0.is_null() {
+            window.window().request_redraw();
+            return;
+        }
+
+        CACHED_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        apply_window_attributes(hwnd);
+        sync_surface_to_client_rect(window, hwnd);
+
+        let mut wr = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut wr);
+        let win_w = wr.right - wr.left;
+        let win_h = wr.bottom - wr.top;
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let x = (screen_w - win_w) / 2;
+        let y = (screen_h - win_h) / 2;
+
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+        sync_surface_to_client_rect(window, hwnd);
+        let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(hwnd);
+    }
+
     window.window().request_redraw();
 }
 
@@ -850,10 +931,17 @@ fn main() {
 
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(40), move || {
         let Some(w) = window_weak.upgrade() else { return; };
-
-        // Force consecutive redraws across event loop frames after show to avoid DPI unpainted borders
         if redraw_counter > 0 {
             redraw_counter -= 1;
+            #[cfg(target_os = "windows")]
+            {
+                let cached = CACHED_HWND.load(Ordering::Relaxed);
+                if cached != 0
+                    && sync_surface_to_client_rect(&w, windows::Win32::Foundation::HWND(cached as _))
+                {
+                    redraw_counter = redraw_counter.max(2);
+                }
+            }
             w.window().request_redraw();
         }
 

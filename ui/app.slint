@@ -16,8 +16,13 @@ export component MainWindow inherits Window {
     title: "Clipped";
     no-frame: true;
     background: #181825;
-    width: 480px;
-    height: 360px;
+    // Size is requested, not pinned: the backend owns width/height so the item tree always
+    // matches the surface the renderer was handed. A hard width/height binding cannot react
+    // to a scale-factor change, which leaves the area outside the stale buffer unpainted.
+    preferred-width: 480px;
+    preferred-height: 360px;
+    min-width: 480px;
+    min-height: 360px;
     default-font-family: "Segoe UI, -apple-system, system-ui, sans-serif";
 
     in-out property <[ClipData]> clips: [];
@@ -51,8 +56,8 @@ export component MainWindow inherits Window {
     forward-focus: main-scope;
 
     main-scope := FocusScope {
-        width: 100%;
-        height: 100%;
+        width: root.width;
+        height: root.height;
 
         init => {
             self.focus();
