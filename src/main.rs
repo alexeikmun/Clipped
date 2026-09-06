@@ -153,8 +153,8 @@ fn center_and_focus_window(window: &MainWindow) {
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     let size = window.window().size();
-    let win_w = if size.width > 0 { size.width as i32 } else { 580 };
-    let win_h = if size.height > 0 { size.height as i32 } else { 380 };
+    let win_w = if size.width > 0 { size.width as i32 } else { 480 };
+    let win_h = if size.height > 0 { size.height as i32 } else { 360 };
     let x = (screen_w - win_w) / 2;
     let y = (screen_h - win_h) / 2;
 

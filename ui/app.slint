@@ -16,8 +16,8 @@ export component MainWindow inherits Window {
     title: "Clipped";
     no-frame: true;
     background: #1e1e2e;
-    preferred-width: 580px;
-    preferred-height: 380px;
+    preferred-width: 480px;
+    preferred-height: 360px;
     default-font-family: "Segoe UI, -apple-system, system-ui, sans-serif";
 
     in-out property <[ClipData]> clips: [];
@@ -273,8 +273,6 @@ export component MainWindow inherits Window {
 
                 // Content Viewport
                 content_rect := Rectangle {
-                    background: #00000033;
-                    border-radius: 12px;
                     clip: true;
 
                     content_touch := TouchArea {
@@ -380,7 +378,10 @@ export component MainWindow inherits Window {
                     // 3. Single Card View (when not searching and not favorites)
                     if !root.show_settings && !root.is_search_visible && !root.show_favorites && root.clips.length > 0 : ScrollView {
                         VerticalLayout {
-                            padding: 14px;
+                            padding-left: 6px;
+                            padding-right: 6px;
+                            padding-top: 4px;
+                            padding-bottom: 28px;
                             spacing: 8px;
                             alignment: start;
 
