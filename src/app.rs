@@ -458,7 +458,15 @@ pub fn run_app() -> windows::core::Result<()> {
 
         println!("Clipped (Pure Win32 + Direct2D) running with ~3 MB memory footprint!");
 
-        (*state_ptr).show_modal();
+        let is_autostart = std::env::args().any(|a| a == "--autostart" || a == "--minimized");
+
+        if (*state_ptr).ui.settings.launch_on_boot {
+            set_launch_on_boot(true);
+        }
+
+        if !is_autostart {
+            (*state_ptr).show_modal();
+        }
 
         // Message Loop
         let mut msg = MSG::default();
@@ -871,7 +879,7 @@ fn set_launch_on_boot(enable: bool) {
             let val_name = w!("Clipped");
             if enable {
                 if let Ok(exe) = std::env::current_exe() {
-                    let path_str = exe.to_string_lossy().to_string();
+                    let path_str = format!("\"{}\" --autostart", exe.to_string_lossy());
                     let utf16: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
                     let bytes = std::slice::from_raw_parts(
                         utf16.as_ptr() as *const u8,

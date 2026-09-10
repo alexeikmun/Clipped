@@ -32,6 +32,11 @@ cargo run
 
 # Build optimized release binary (target/release/clipped.exe)
 cargo build --release
+
+# Build installer package and SHA256 hashes
+.\scripts\build-installer.ps1
+# or manually:
+makensis installer.nsi
 ```
 
 ---

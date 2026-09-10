@@ -19,7 +19,7 @@ fn default_max_items() -> usize {
 }
 
 fn default_launch_on_boot() -> bool {
-    false
+    true
 }
 
 impl Default for AppSettings {
@@ -27,7 +27,7 @@ impl Default for AppSettings {
         Self {
             shortcut: DEFAULT_SHORTCUT.to_string(),
             max_items: 999,
-            launch_on_boot: false,
+            launch_on_boot: true,
         }
     }
 }

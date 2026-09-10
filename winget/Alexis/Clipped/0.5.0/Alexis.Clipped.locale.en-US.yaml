@@ -1,0 +1,10 @@
+PackageIdentifier: Alexis.Clipped
+PackageVersion: 0.5.0
+PackageLocale: en-US
+Publisher: Alexis
+PackageName: Clipped
+PackageUrl: https://github.com/alexis/clipped
+License: MIT
+ShortDescription: Ultra-lightweight native Windows clipboard manager in pure Rust + Direct2D.
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

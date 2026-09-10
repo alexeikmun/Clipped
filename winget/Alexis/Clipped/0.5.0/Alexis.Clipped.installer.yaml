@@ -1,0 +1,11 @@
+PackageIdentifier: Alexis.Clipped
+PackageVersion: 0.5.0
+InstallerLocale: en-US
+MinimumOSVersion: 10.0.0.0
+InstallerType: nullsoft
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/alexis/clipped/blob/main/releases/download/clipped_0.5.0_x64-setup.exe
+    InstallerSha256: 3F3E70BF86EA164B304018D960ABD2D34A4DC4808FE65F2A80A18C0C44DC79AA
+ManifestType: installer
+ManifestVersion: 1.6.0

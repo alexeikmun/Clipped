@@ -1006,7 +1006,7 @@ impl UiState {
             bottom: info_y + 80.0,
         };
         d2d.draw_text(
-            "Clipped v0.2.0 • Pure Rust Native Architecture\nDirect2D Hardware-Accelerated Rendering\nIdle Memory Target: < 4 MB (Working Set Purge Active)",
+            concat!("Clipped v", env!("CARGO_PKG_VERSION"), " • Pure Rust Native Architecture\nDirect2D Hardware-Accelerated Rendering\nIdle Memory Target: < 4 MB (Working Set Purge Active)"),
             &formats.meta,
             &info_rect,
             &brushes.text_muted,

@@ -40,4 +40,9 @@ cargo run
 
 # Build optimized release binary (~1.5 MB)
 cargo build --release
+
+# Build installer package (creates releases/download/clipped_0.5.0_x64-setup.exe)
+powershell -ExecutionPolicy Bypass -File .\scripts\build-installer.ps1
+# or manually:
+makensis installer.nsi
 ```
