@@ -382,7 +382,7 @@ impl UiState {
             let mut img_drawn = false;
             if let Some(ref rel_or_abs) = item.image_path {
                 let p = std::path::Path::new(rel_or_abs);
-                let full = if p.is_absolute() {
+                let full = if p.is_absolute() || p.exists() {
                     p.to_path_buf()
                 } else {
                     self.data_dir.join(p)
@@ -530,9 +530,45 @@ struct MatchSnippet {
 fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
     if item.clip_type == "image" {
         let dim = match (item.image_width, item.image_height) {
-            (Some(w), Some(h)) => format!("📷 Image • {} × {}", w, h),
-            _ => "📷 Image".to_string(),
+            (Some(w), Some(h)) => format!("Image • {} × {}", w, h),
+            _ => "Image".to_string(),
         };
+
+        let trimmed_query = query.trim();
+        if !trimmed_query.is_empty() {
+            if let Some(ref ocr) = item.ocr_text {
+                let ocr_lower = ocr.to_lowercase();
+                let q_lower = trimmed_query.to_lowercase();
+                if ocr_lower.contains(&q_lower) {
+                    let ocr_lines: Vec<&str> = ocr.lines().collect();
+                    let mut match_idx = 0;
+                    for (idx, line) in ocr_lines.iter().enumerate() {
+                        if line.to_lowercase().contains(&q_lower) {
+                            match_idx = idx;
+                            break;
+                        }
+                    }
+                    let matched_line = ocr_lines.get(match_idx).map(|l| l.trim()).unwrap_or("");
+                    let line_lower = matched_line.to_lowercase();
+                    let query_utf16_len = trimmed_query.encode_utf16().count();
+
+                    let (display_text, highlight_range) = if let Some(byte_pos) = line_lower.find(&q_lower) {
+                        let start_u16 = matched_line[..byte_pos].encode_utf16().count();
+                        let end_u16 = start_u16 + query_utf16_len;
+                        (matched_line.to_string(), Some((start_u16, end_u16)))
+                    } else {
+                        (matched_line.to_string(), None)
+                    };
+
+                    return MatchSnippet {
+                        primary: display_text,
+                        primary_highlight: highlight_range,
+                        secondary: format!("OCR Match • {}", dim),
+                    };
+                }
+            }
+        }
+
         let ocr_info = if let Some(ref ocr) = item.ocr_text {
             let ocr_trimmed = ocr.trim();
             if !ocr_trimmed.is_empty() {
@@ -751,10 +787,62 @@ impl UiState {
                 );
             }
 
+            // Image thumbnail preview for image clips
+            let is_image = item.clip_type == "image";
+            let thumb_w = 40.0;
+            let thumb_h = 40.0;
+            let thumb_x = list_x + 10.0;
+            let thumb_y = row_y + (row_h - thumb_h) * 0.5;
+
+            if is_image {
+                // Background thumbnail box
+                d2d.draw_rounded_rect(
+                    thumb_x,
+                    thumb_y,
+                    thumb_w,
+                    thumb_h,
+                    4.0,
+                    &brushes.badge_bg,
+                    Some((&brushes.border, 1.0)),
+                );
+
+                let mut img_drawn = false;
+                if let Some(ref rel_or_abs) = item.image_path {
+                    let p = std::path::Path::new(rel_or_abs);
+                    let full = if p.is_absolute() || p.exists() {
+                        p.to_path_buf()
+                    } else {
+                        self.data_dir.join(p)
+                    };
+                    if let Some(full_str) = full.to_str() {
+                        if let Some(bmp) = d2d.get_or_load_bitmap(full_str) {
+                            d2d.push_clip(thumb_x + 1.0, thumb_y + 1.0, thumb_w - 2.0, thumb_h - 2.0);
+                            d2d.draw_bitmap_contain(&bmp, thumb_x + 1.0, thumb_y + 1.0, thumb_w - 2.0, thumb_h - 2.0);
+                            d2d.pop_clip();
+                            img_drawn = true;
+                        }
+                    }
+                }
+
+                if !img_drawn {
+                    let placeholder_rect = D2D_RECT_F {
+                        left: thumb_x,
+                        top: thumb_y,
+                        right: thumb_x + thumb_w,
+                        bottom: thumb_y + thumb_h,
+                    };
+                    d2d.draw_text("IMG", &formats.dock, &placeholder_rect, &brushes.text_muted);
+                }
+            }
+
             // Extract match snippet: exact matching line and context
             let snippet = get_match_snippet(item, &self.search_query);
 
-            let text_left = list_x + 16.0;
+            let text_left = if is_image {
+                thumb_x + thumb_w + 10.0
+            } else {
+                list_x + 16.0
+            };
             let text_right = list_x + list_w - 38.0;
 
             // Line 1: Exact matching line (or first meaningful line)

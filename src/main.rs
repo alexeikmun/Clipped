@@ -124,17 +124,16 @@ fn main() -> windows::core::Result<()> {
                 ocr_text: None,
                 full_text_len: sample_json.len(),
             };
-            let sample_json2 = "{\n  \"description\": \"Fast clipboard manager\"\n}";
             let item3 = db::ClipItem {
                 id: "3".into(),
-                text: sample_json2.into(),
+                text: "[Image 256x256]".into(),
                 is_favorite: false,
-                clip_type: "text".into(),
-                image_path: None,
-                image_width: None,
-                image_height: None,
-                ocr_text: None,
-                full_text_len: sample_json2.len(),
+                clip_type: "image".into(),
+                image_path: Some("assets/icon.png".into()),
+                image_width: Some(256),
+                image_height: Some(256),
+                ocr_text: Some("Clipped Desktop App".into()),
+                full_text_len: 0,
             };
             ui.set_clips(vec![item1, item2, item3], Some(1));
             if let Err(_e) = d2d.export_ui_to_png(&mut ui, model::WINDOW_WIDTH as u32, model::WINDOW_HEIGHT as u32, std::path::Path::new(path_str)) {

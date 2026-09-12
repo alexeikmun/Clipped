@@ -1042,4 +1042,38 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_favorites_never_pruned_on_rotation() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).expect("init db");
+
+        // 1. Create a favorite clip
+        let fav = db.save_or_bump_text("Starred secret key".into(), "hash_star").unwrap();
+        db.toggle_favorite(&fav.id).unwrap();
+
+        // 2. Insert 1,200 new non-favorite clips, exceeding max_items (999)
+        let max_items = 999;
+        for i in 0..1200 {
+            db.save_or_bump_text(format!("Item {}", i), &format!("hash_{}", i)).unwrap();
+            let _ = db.prune_history(max_items);
+        }
+
+        // 3. Verify favorite clip is STILL in the database and was NEVER deleted
+        let full_fav = db.get_full_clip(&fav.id).unwrap().expect("favorite clip must exist in DB");
+        assert!(full_fav.is_favorite);
+        assert_eq!(full_fav.text, "Starred secret key");
+
+        // 4. Verify favorite is returned when viewing favorites
+        let favs = db.get_history(max_items, true).unwrap();
+        assert_eq!(favs.len(), 1);
+        assert_eq!(favs[0].id, fav.id);
+
+        // 5. Verify search finds it immediately
+        let found = db.search_clips("Starred", false, 10).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, fav.id);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
