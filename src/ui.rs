@@ -114,16 +114,16 @@ impl UiState {
 
         match self.mode {
             UiMode::Settings => {
-                // Launch on boot toggle: x: 30..450, y: 80..110
-                if x >= 30.0 && x <= 450.0 && y >= 80.0 && y <= 112.0 {
+                // Launch on boot toggle: x: 24.0..456.0, y: 92.0..128.0
+                if x >= 24.0 && x <= 456.0 && y >= 92.0 && y <= 128.0 {
                     return HitTarget::SettingsBootToggle;
                 }
-                // Clear non-favorites: x: 30..220, y: 170..202
-                if x >= 30.0 && x <= 220.0 && y >= 170.0 && y <= 202.0 {
+                // Clear non-favorites: x: 24.0..234.0, y: 150.0..184.0
+                if x >= 24.0 && x <= 234.0 && y >= 150.0 && y <= 184.0 {
                     return HitTarget::ClearNonFavorites;
                 }
-                // Clear all: x: 235..425, y: 170..202
-                if x >= 235.0 && x <= 425.0 && y >= 170.0 && y <= 202.0 {
+                // Clear all: x: 246.0..456.0, y: 150.0..184.0
+                if x >= 246.0 && x <= 456.0 && y >= 150.0 && y <= 184.0 {
                     return HitTarget::ClearAll;
                 }
             }
@@ -430,7 +430,7 @@ impl UiState {
             d2d.pop_clip();
 
             // Metadata footer (language tag, character count & lines)
-            let len = item.text.chars().count();
+            let len = item.full_text_len.max(item.text.chars().count());
             let lines = item.text.lines().count();
             let lang = crate::syntax::detect_language(&item.text);
             let lang_label = match lang {
@@ -443,7 +443,7 @@ impl UiState {
             let meta_rect = D2D_RECT_F {
                 left: card_x + 14.0,
                 top: card_y + card_h - 22.0,
-                right: card_x + 260.0,
+                right: card_x + card_w - 14.0,
                 bottom: card_y + card_h - 6.0,
             };
             d2d.draw_text(&meta_text, &formats.small, &meta_rect, &brushes.text_muted);

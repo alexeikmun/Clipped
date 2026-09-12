@@ -5,7 +5,7 @@ use std::time::Duration;
 use arboard::Clipboard;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, KEYEVENTF_KEYUP, VK_CONTROL, VK_MENU, VK_SHIFT, VK_V,
+    VK_CONTROL, VK_MENU, VK_SHIFT, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
@@ -69,16 +69,42 @@ pub fn perform_paste(
     thread::sleep(Duration::from_millis(60));
 
     unsafe {
-        // Release any modifiers that might be held from global hotkey
-        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_SHIFT.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_CONTROL.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+            KEYEVENTF_KEYUP, VK_LWIN, VK_RWIN,
+        };
 
-        // Synthesize Ctrl+V
-        keybd_event(VK_CONTROL.0 as u8, 0, windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0), 0);
-        keybd_event(VK_V.0 as u8, 0, windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0), 0);
-        keybd_event(VK_V.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_CONTROL.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        let make_key = |vk, keyup: bool| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if keyup { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        // 1. Release all modifier keys that could be held from the global hotkey
+        let releases = [
+            make_key(VK_MENU, true),
+            make_key(VK_SHIFT, true),
+            make_key(VK_CONTROL, true),
+            make_key(VK_LWIN, true),
+            make_key(VK_RWIN, true),
+        ];
+        SendInput(&releases, std::mem::size_of::<INPUT>() as i32);
+
+        // 2. Synthesize atomic Ctrl+V keystroke
+        let paste_inputs = [
+            make_key(VK_CONTROL, false),
+            make_key(VK_V, false),
+            make_key(VK_V, true),
+            make_key(VK_CONTROL, true),
+        ];
+        SendInput(&paste_inputs, std::mem::size_of::<INPUT>() as i32);
     }
 
     // Give the target app a moment to receive the paste before resuming clipboard monitoring

@@ -702,6 +702,20 @@ impl Database {
         Ok(deleted_images)
     }
 
+    /// Deletes ALL clips (including favorites) and returns image paths for disk deletion
+    pub fn clear_all_history(&self) -> Result<Vec<String>> {
+        let conn = self.writer_conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut deleted_images = Vec::new();
+        for p in rows.flatten() {
+            deleted_images.push(p);
+        }
+
+        conn.execute("DELETE FROM clips", [])?;
+        Ok(deleted_images)
+    }
+
     /// Releases unused cached pages from SQLite back to the OS allocator
     pub fn shrink_memory(&self) {
         if let Ok(conn) = self.writer_conn.lock() {
@@ -967,6 +981,64 @@ mod tests {
 
         // Assert gone from FTS
         assert_eq!(db.search_clips("Receipt", false, 10).unwrap().len(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_clear_all_history() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).expect("init db");
+
+        let item1 = db.save_or_bump_text("Item 1".into(), "hash1").unwrap();
+        db.toggle_favorite(&item1.id).unwrap(); // Favorite item
+
+        let _item2 = db.save_or_bump_text("Item 2".into(), "hash2").unwrap();
+
+        let img_clip = ClipItem {
+            id: "img_clear_all".into(),
+            text: "[Image]".into(),
+            is_favorite: true,
+            clip_type: "image".into(),
+            image_path: Some("images/fav_img.png".into()),
+            image_width: Some(100),
+            image_height: Some(100),
+            ocr_text: None,
+            full_text_len: 0,
+        };
+        db.insert_image_clip(&img_clip, "hash_fav_img").unwrap();
+
+        assert_eq!(db.get_history(10, false).unwrap().len(), 3);
+
+        let deleted_imgs = db.clear_all_history().unwrap();
+        assert_eq!(deleted_imgs, vec!["images/fav_img.png".to_string()]);
+
+        // Everything cleared, including favorites
+        assert_eq!(db.get_history(10, false).unwrap().len(), 0);
+        assert_eq!(db.get_history(10, true).unwrap().len(), 0);
+        assert_eq!(db.search_clips("Item", false, 10).unwrap().len(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_long_text_clip_full_fetch() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).expect("init db");
+
+        let long_text = "A".repeat(5000);
+        let item = db.save_or_bump_text(long_text.clone(), "hash_long").unwrap();
+        assert_eq!(item.full_text_len, 5000);
+
+        // History gives preview capped at MAX_PREVIEW_LEN (1000)
+        let history = db.get_history(10, false).unwrap();
+        assert_eq!(history[0].text.len(), 1000);
+        assert_eq!(history[0].full_text_len, 5000);
+
+        // get_full_clip gives full 5000 characters
+        let full = db.get_full_clip(&item.id).unwrap().expect("full clip found");
+        assert_eq!(full.text.len(), 5000);
+        assert_eq!(full.text, long_text);
 
         let _ = fs::remove_dir_all(&dir);
     }

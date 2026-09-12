@@ -7,7 +7,8 @@ pub fn extract_ocr_text(image_path: &Path) -> Option<String> {
     use windows::Storage::StorageFile;
 
     let path_str = image_path.canonicalize().ok()?.to_string_lossy().to_string();
-    let file = StorageFile::GetFileFromPathAsync(&windows::core::HSTRING::from(path_str)).ok()?.get().ok()?;
+    let clean_path = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str);
+    let file = StorageFile::GetFileFromPathAsync(&windows::core::HSTRING::from(clean_path)).ok()?.get().ok()?;
     let stream = file.OpenAsync(windows::Storage::FileAccessMode::Read).ok()?.get().ok()?;
     let decoder = BitmapDecoder::CreateAsync(&stream).ok()?.get().ok()?;
     let bitmap = decoder.GetSoftwareBitmapAsync().ok()?.get().ok()?;

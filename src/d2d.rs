@@ -395,6 +395,10 @@ impl D2dContext {
         }
     }
 
+    pub fn clear_bitmap_cache(&self) {
+        self.bitmap_cache.borrow_mut().clear();
+    }
+
     pub fn draw_rounded_rect(
         &self,
         x: f32,

@@ -19,7 +19,7 @@ use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Registry::*;
-use windows::Win32::System::Threading::GetCurrentProcess;
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -128,6 +128,9 @@ impl AppState {
                 self.ui.search_query.clear();
                 self.ui.hover_target = HitTarget::None;
 
+                // Evict cached Direct2D textures from VRAM/RAM
+                self.d2d.clear_bitmap_cache();
+
                 // Memory trim on modal close
                 self.db.shrink_memory();
                 let _ = EmptyWorkingSet(GetCurrentProcess());
@@ -140,11 +143,38 @@ impl AppState {
             let width = (WINDOW_WIDTH * self.dpi_scale).round() as i32;
             let height = (WINDOW_HEIGHT * self.dpi_scale).round() as i32;
 
-            let screen_w = GetSystemMetrics(SM_CXSCREEN);
-            let screen_h = GetSystemMetrics(SM_CYSCREEN);
+            let prev_fg = self.previous_foreground.load(Ordering::Relaxed);
+            let target_hwnd = if prev_fg != 0 {
+                HWND(prev_fg as _)
+            } else {
+                GetForegroundWindow()
+            };
 
-            let x = (screen_w - width) / 2;
-            let y = (screen_h - height) / 2;
+            let hmon = if !target_hwnd.0.is_null() && target_hwnd != self.hwnd {
+                MonitorFromWindow(target_hwnd, MONITOR_DEFAULTTONEAREST)
+            } else {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+            };
+
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+
+            let (x, y) = if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                let work_w = mi.rcWork.right - mi.rcWork.left;
+                let work_h = mi.rcWork.bottom - mi.rcWork.top;
+                (
+                    mi.rcWork.left + (work_w - width) / 2,
+                    mi.rcWork.top + (work_h - height) / 2,
+                )
+            } else {
+                let screen_w = GetSystemMetrics(SM_CXSCREEN);
+                let screen_h = GetSystemMetrics(SM_CYSCREEN);
+                ((screen_w - width) / 2, (screen_h - height) / 2)
+            };
 
             let _ = SetWindowPos(
                 self.hwnd,
@@ -283,11 +313,14 @@ impl AppState {
             let prev_hwnd = self.previous_foreground.load(Ordering::Relaxed);
             let data_dir = self.ui.data_dir.clone();
 
+            // Fetch full clip from database to avoid truncating long clips
+            let clip_to_paste = self.db.get_full_clip(&clip.id).ok().flatten().unwrap_or(clip);
+
             self.hide_modal();
 
             let mon = self.is_monitoring.clone();
             std::thread::spawn(move || {
-                perform_paste(&clip, &data_dir, prev_hwnd, &mon);
+                perform_paste(&clip_to_paste, &data_dir, prev_hwnd, &mon);
             });
         }
     }
@@ -295,7 +328,15 @@ impl AppState {
     pub fn delete_selected(&mut self) {
         if let Some(clip) = self.ui.selected_clip() {
             let id = clip.id.clone();
-            let _ = self.db.delete_clip(&id);
+            if let Ok(Some(img_path)) = self.db.delete_clip(&id) {
+                let path = Path::new(&img_path);
+                let full = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.ui.data_dir.join(path)
+                };
+                let _ = fs::remove_file(full);
+            }
             self.refresh_ui_clips();
         }
     }
@@ -339,6 +380,20 @@ impl AppState {
 
 pub fn run_app() -> windows::core::Result<()> {
     unsafe {
+        // Enforce single running instance
+        let mutex_name = w!("Local\\Clipped_SingleInstance_Mutex");
+        let _single_instance_mutex = CreateMutexW(None, true, mutex_name);
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let class_name = w!("ClippedWindowClass");
+            if let Ok(existing_hwnd) = FindWindowW(class_name, None) {
+                if !existing_hwnd.0.is_null() {
+                    let _ = ShowWindow(existing_hwnd, SW_SHOW);
+                    let _ = SetForegroundWindow(existing_hwnd);
+                }
+            }
+            return Ok(());
+        }
+
         // Initialize COM apartment
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
@@ -705,7 +760,7 @@ unsafe extern "system" fn wnd_proc(
                     state.refresh_ui_clips();
                 }
                 HitTarget::ClearAll => {
-                    if let Ok(deleted) = state.db.prune_history(0) {
+                    if let Ok(deleted) = state.db.clear_all_history() {
                         for p in deleted {
                             let path = Path::new(&p);
                             let full = if path.is_absolute() {
