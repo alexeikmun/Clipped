@@ -287,9 +287,14 @@ impl AppState {
     }
 
     pub fn refresh_ui_clips(&mut self) {
+        self.refresh_ui_clips_with_selection(None);
+    }
+
+    pub fn refresh_ui_clips_with_selection(&mut self, select_idx: Option<usize>) {
         unsafe {
             if IsWindowVisible(self.hwnd).as_bool() {
-                let clips = if self.ui.search_query.is_empty() {
+                let is_search = !self.ui.search_query.is_empty();
+                let clips = if !is_search {
                     self.db
                         .get_history(self.ui.settings.max_items, self.ui.show_favorites)
                         .unwrap_or_default()
@@ -302,7 +307,8 @@ impl AppState {
                         )
                         .unwrap_or_default()
                 };
-                self.ui.set_clips(clips, None);
+                let effective_idx = select_idx.or_else(|| if is_search { Some(0) } else { None });
+                self.ui.set_clips(clips, effective_idx);
                 let _ = InvalidateRect(self.hwnd, None, false);
             }
         }
@@ -337,7 +343,8 @@ impl AppState {
                 };
                 let _ = fs::remove_file(full);
             }
-            self.refresh_ui_clips();
+            let curr_idx = self.ui.selected_index;
+            self.refresh_ui_clips_with_selection(Some(curr_idx));
         }
     }
 
@@ -345,7 +352,8 @@ impl AppState {
         if let Some(clip) = self.ui.selected_clip() {
             let id = clip.id.clone();
             let _ = self.db.toggle_favorite(&id);
-            self.refresh_ui_clips();
+            let curr_idx = self.ui.selected_index;
+            self.refresh_ui_clips_with_selection(Some(curr_idx));
         }
     }
 
@@ -712,11 +720,13 @@ unsafe extern "system" fn wnd_proc(
             match hit {
                 HitTarget::FavFilter => {
                     state.ui.show_favorites = !state.ui.show_favorites;
-                    state.refresh_ui_clips();
+                    state.refresh_ui_clips_with_selection(Some(0));
                 }
                 HitTarget::SearchBox => {
                     if state.ui.mode == UiMode::SingleCard {
                         state.ui.mode = UiMode::SearchList;
+                        state.ui.selected_index = 0;
+                        state.ui.ensure_selected_visible();
                         let _ = InvalidateRect(hwnd, None, false);
                     }
                 }
@@ -757,7 +767,7 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     state.ui.settings_message = "Non-favorites cleared!".to_string();
-                    state.refresh_ui_clips();
+                    state.refresh_ui_clips_with_selection(Some(0));
                 }
                 HitTarget::ClearAll => {
                     if let Ok(deleted) = state.db.clear_all_history() {
@@ -772,7 +782,7 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     state.ui.settings_message = "History cleared!".to_string();
-                    state.refresh_ui_clips();
+                    state.refresh_ui_clips_with_selection(Some(0));
                 }
                 HitTarget::None => {}
             }
@@ -797,7 +807,7 @@ unsafe extern "system" fn wnd_proc(
                 VK_TAB => {
                     if state.ui.mode != UiMode::Settings {
                         state.ui.show_favorites = !state.ui.show_favorites;
-                        state.refresh_ui_clips();
+                        state.refresh_ui_clips_with_selection(Some(0));
                         let _ = InvalidateRect(hwnd, None, false);
                     }
                 }
@@ -808,7 +818,7 @@ unsafe extern "system" fn wnd_proc(
                     } else if state.ui.mode == UiMode::SearchList {
                         state.ui.search_query.clear();
                         state.ui.mode = UiMode::SingleCard;
-                        state.refresh_ui_clips();
+                        state.refresh_ui_clips_with_selection(Some(0));
                     } else {
                         state.hide_modal();
                     }
@@ -848,8 +858,10 @@ unsafe extern "system" fn wnd_proc(
                         if state.ui.search_query.pop().is_some() {
                             if state.ui.search_query.is_empty() {
                                 state.ui.mode = UiMode::SingleCard;
+                                state.refresh_ui_clips_with_selection(Some(0));
+                            } else {
+                                state.refresh_ui_clips_with_selection(Some(0));
                             }
-                            state.refresh_ui_clips();
                         }
                     }
                 }
@@ -877,7 +889,7 @@ unsafe extern "system" fn wnd_proc(
                     state.ui.search_query.clear();
                 }
                 state.ui.search_query.push(ch);
-                state.refresh_ui_clips();
+                state.refresh_ui_clips_with_selection(Some(0));
             }
             LRESULT(0)
         }

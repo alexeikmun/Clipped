@@ -490,6 +490,73 @@ impl Database {
         Ok(items)
     }
 
+    fn query_fts_ranked(
+        conn: &Connection,
+        fts_expr: &str,
+        trimmed_query: &str,
+        favorites_only: bool,
+        limit: usize,
+    ) -> Result<Vec<ClipItem>> {
+        let fts_sql = if favorites_only {
+            "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text
+             FROM clips c
+             JOIN clips_fts f ON c.rowid = f.rowid
+             WHERE clips_fts MATCH ?1 AND c.is_favorite = 1
+             ORDER BY
+               CASE
+                 WHEN (c.text LIKE ?3 || '%' OR (c.ocr_text IS NOT NULL AND c.ocr_text LIKE ?3 || '%')) THEN 0
+                 WHEN (c.text LIKE '%' || ?3 || '%' OR (c.ocr_text IS NOT NULL AND c.ocr_text LIKE '%' || ?3 || '%')) THEN 1
+                 ELSE 2
+               END ASC,
+               bm25(clips_fts), c.created_at DESC
+             LIMIT ?2"
+        } else {
+            "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text
+             FROM clips c
+             JOIN clips_fts f ON c.rowid = f.rowid
+             WHERE clips_fts MATCH ?1
+             ORDER BY
+               CASE
+                 WHEN (c.text LIKE ?3 || '%' OR (c.ocr_text IS NOT NULL AND c.ocr_text LIKE ?3 || '%')) THEN 0
+                 WHEN (c.text LIKE '%' || ?3 || '%' OR (c.ocr_text IS NOT NULL AND c.ocr_text LIKE '%' || ?3 || '%')) THEN 1
+                 ELSE 2
+               END ASC,
+               bm25(clips_fts), c.created_at DESC
+             LIMIT ?2"
+        };
+
+        if let Ok(mut stmt) = conn.prepare(fts_sql) {
+            let rows_res = stmt.query_map(params![fts_expr, limit as i64, trimmed_query], |row| {
+                let full_text: String = row.get(1)?;
+                let text_len = full_text.len();
+                let preview_text = truncate_preview(&full_text, MAX_PREVIEW_LEN);
+                let raw_ocr: Option<String> = row.get(7)?;
+                let preview_ocr = raw_ocr.map(|o| truncate_preview(&o, MAX_PREVIEW_LEN));
+
+                Ok(ClipItem {
+                    id: row.get(0)?,
+                    text: preview_text,
+                    is_favorite: row.get::<_, i32>(2)? != 0,
+                    clip_type: row.get(3)?,
+                    image_path: row.get(4)?,
+                    image_width: row.get(5)?,
+                    image_height: row.get(6)?,
+                    ocr_text: preview_ocr,
+                    full_text_len: text_len,
+                })
+            });
+
+            if let Ok(rows) = rows_res {
+                let mut items = Vec::new();
+                for item in rows.flatten() {
+                    items.push(item);
+                }
+                return Ok(items);
+            }
+        }
+        Ok(Vec::new())
+    }
+
     pub fn search_clips(&self, query: &str, favorites_only: bool, limit: usize) -> Result<Vec<ClipItem>> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -498,85 +565,69 @@ impl Database {
 
         let conn = self.reader_conn.lock().unwrap();
 
-        // 1. Build sanitized FTS5 prefix query
-        let terms: Vec<String> = trimmed
-            .split_whitespace()
+        // 1. Build sanitized FTS5 tokens
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        let clean_words: Vec<String> = words
+            .iter()
             .map(|w| {
-                let clean: String = w.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect();
-                clean
+                w.chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                    .collect()
             })
-            .filter(|w| !w.is_empty())
-            .map(|w| format!("\"{}\"*", w))
+            .filter(|w: &String| !w.is_empty())
             .collect();
 
-        if !terms.is_empty() {
-            let fts_expr = terms.join(" ");
-            // P3: External content table query uses direct c.rowid = f.rowid join
-            let fts_sql = if favorites_only {
-                "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text
-                 FROM clips c
-                 JOIN clips_fts f ON c.rowid = f.rowid
-                 WHERE clips_fts MATCH ?1 AND c.is_favorite = 1
-                 ORDER BY bm25(clips_fts), c.created_at DESC
-                 LIMIT ?2"
-            } else {
-                "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text
-                 FROM clips c
-                 JOIN clips_fts f ON c.rowid = f.rowid
-                 WHERE clips_fts MATCH ?1
-                 ORDER BY bm25(clips_fts), c.created_at DESC
-                 LIMIT ?2"
-            };
-
-            if let Ok(mut stmt) = conn.prepare(fts_sql) {
-                let rows_res = stmt.query_map(params![fts_expr, limit as i64], |row| {
-                    let full_text: String = row.get(1)?;
-                    let text_len = full_text.len();
-                    let preview_text = truncate_preview(&full_text, MAX_PREVIEW_LEN);
-                    let raw_ocr: Option<String> = row.get(7)?;
-                    let preview_ocr = raw_ocr.map(|o| truncate_preview(&o, MAX_PREVIEW_LEN));
-
-                    Ok(ClipItem {
-                        id: row.get(0)?,
-                        text: preview_text,
-                        is_favorite: row.get::<_, i32>(2)? != 0,
-                        clip_type: row.get(3)?,
-                        image_path: row.get(4)?,
-                        image_width: row.get(5)?,
-                        image_height: row.get(6)?,
-                        ocr_text: preview_ocr,
-                        full_text_len: text_len,
-                    })
-                });
-
-                if let Ok(rows) = rows_res {
-                    let mut items = Vec::new();
-                    for item in rows.flatten() {
-                        items.push(item);
-                    }
+        if !clean_words.is_empty() {
+            // Priority 1: If multi-word, try contiguous phrase prefix first ("by co"*)
+            if clean_words.len() > 1 {
+                let phrase_expr = format!("\"{}\"*", clean_words.join(" "));
+                if let Ok(items) = Self::query_fts_ranked(&conn, &phrase_expr, trimmed, favorites_only, limit) {
                     if !items.is_empty() {
                         return Ok(items);
                     }
                 }
             }
+
+            // Priority 2: Standard FTS prefix query with tiered ranking
+            let fts_expr = clean_words
+                .iter()
+                .map(|w| format!("\"{}\"*", w))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if let Ok(items) = Self::query_fts_ranked(&conn, &fts_expr, trimmed, favorites_only, limit) {
+                if !items.is_empty() {
+                    return Ok(items);
+                }
+            }
         }
 
-        // 2. Fallback to LIKE substring search for punctuation, code syntax, or zero FTS results
+        // Priority 3: Fallback to LIKE substring search for punctuation, code syntax, or zero FTS results
         let like_pattern = format!("%{}%", trimmed);
         let like_sql = if favorites_only {
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
              FROM clips
              WHERE (text LIKE ?1 OR (ocr_text IS NOT NULL AND ocr_text LIKE ?1)) AND is_favorite = 1
-             ORDER BY created_at DESC LIMIT ?2"
+             ORDER BY
+               CASE
+                 WHEN (text LIKE ?3 || '%' OR (ocr_text IS NOT NULL AND ocr_text LIKE ?3 || '%')) THEN 0
+                 ELSE 1
+               END ASC,
+               created_at DESC LIMIT ?2"
         } else {
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
              FROM clips
              WHERE (text LIKE ?1 OR (ocr_text IS NOT NULL AND ocr_text LIKE ?1))
-             ORDER BY created_at DESC LIMIT ?2"
+             ORDER BY
+               CASE
+                 WHEN (text LIKE ?3 || '%' OR (ocr_text IS NOT NULL AND ocr_text LIKE ?3 || '%')) THEN 0
+                 ELSE 1
+               END ASC,
+               created_at DESC LIMIT ?2"
         };
 
         let mut stmt = conn.prepare(like_sql)?;
-        let rows = stmt.query_map(params![like_pattern, limit as i64], |row| {
+        let rows = stmt.query_map(params![like_pattern, limit as i64, trimmed], |row| {
             let full_text: String = row.get(1)?;
             let text_len = full_text.len();
             let preview_text = truncate_preview(&full_text, MAX_PREVIEW_LEN);
@@ -1073,6 +1124,26 @@ mod tests {
         let found = db.search_clips("Starred", false, 10).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, fav.id);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_phrase_prefix_ranking() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).expect("init db");
+
+        // Disconnected clip: has "by" and lots of "code"
+        let _ = db.save_or_bump_text("isn't described by version; update code and context code code".into(), "hash_disc").unwrap();
+
+        // Exact contiguous phrase clip: starts with "By Command"
+        let _ = db.save_or_bump_text("By Command 20.6K 13.1%".into(), "hash_phrase").unwrap();
+
+        // Search for "by co"
+        let results = db.search_clips("by co", false, 10).unwrap();
+        assert!(!results.is_empty());
+        // Best match MUST be the contiguous phrase match
+        assert!(results[0].text.starts_with("By Command"));
 
         let _ = fs::remove_dir_all(&dir);
     }

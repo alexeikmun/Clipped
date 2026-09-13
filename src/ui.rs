@@ -50,6 +50,9 @@ impl UiState {
         } else if self.selected_index >= self.clips.len() && !self.clips.is_empty() {
             self.selected_index = self.clips.len() - 1;
         }
+        if self.clips.is_empty() {
+            self.scroll_offset = 0.0;
+        }
         self.ensure_selected_visible();
     }
 
@@ -539,22 +542,39 @@ fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
             if let Some(ref ocr) = item.ocr_text {
                 let ocr_lower = ocr.to_lowercase();
                 let q_lower = trimmed_query.to_lowercase();
+                let query_terms: Vec<&str> = trimmed_query.split_whitespace().collect();
+
+                let mut target_needle = None;
                 if ocr_lower.contains(&q_lower) {
+                    target_needle = Some(q_lower);
+                } else if query_terms.len() > 1 {
+                    let mut sorted = query_terms.clone();
+                    sorted.sort_by_key(|b| std::cmp::Reverse(b.len()));
+                    for t in sorted {
+                        let tl = t.to_lowercase();
+                        if ocr_lower.contains(&tl) {
+                            target_needle = Some(tl);
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(needle) = target_needle {
                     let ocr_lines: Vec<&str> = ocr.lines().collect();
                     let mut match_idx = 0;
                     for (idx, line) in ocr_lines.iter().enumerate() {
-                        if line.to_lowercase().contains(&q_lower) {
+                        if line.to_lowercase().contains(&needle) {
                             match_idx = idx;
                             break;
                         }
                     }
                     let matched_line = ocr_lines.get(match_idx).map(|l| l.trim()).unwrap_or("");
                     let line_lower = matched_line.to_lowercase();
-                    let query_utf16_len = trimmed_query.encode_utf16().count();
+                    let needle_utf16_len = needle.encode_utf16().count();
 
-                    let (display_text, highlight_range) = if let Some(byte_pos) = line_lower.find(&q_lower) {
+                    let (display_text, highlight_range) = if let Some(byte_pos) = line_lower.find(&needle) {
                         let start_u16 = matched_line[..byte_pos].encode_utf16().count();
-                        let end_u16 = start_u16 + query_utf16_len;
+                        let end_u16 = start_u16 + needle_utf16_len;
                         (matched_line.to_string(), Some((start_u16, end_u16)))
                     } else {
                         (matched_line.to_string(), None)
@@ -632,9 +652,12 @@ fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
     }
 
     let query_lower = trimmed_query.to_lowercase();
-    let query_utf16_len = trimmed_query.encode_utf16().count();
+    let query_terms: Vec<&str> = trimmed_query.split_whitespace().collect();
 
     let mut match_line_idx = None;
+    let mut matched_needle = query_lower.clone();
+
+    // 1. Try matching full phrase query first
     for (i, line) in lines.iter().enumerate() {
         if line.to_lowercase().contains(&query_lower) {
             match_line_idx = Some(i);
@@ -642,17 +665,37 @@ fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
         }
     }
 
+    // 2. If no full phrase match, try matching individual terms (longest first)
+    if match_line_idx.is_none() && query_terms.len() > 1 {
+        let mut sorted_terms = query_terms.clone();
+        sorted_terms.sort_by_key(|b| std::cmp::Reverse(b.len()));
+        for term in sorted_terms {
+            let t_lower = term.to_lowercase();
+            for (i, line) in lines.iter().enumerate() {
+                if line.to_lowercase().contains(&t_lower) {
+                    match_line_idx = Some(i);
+                    matched_needle = t_lower;
+                    break;
+                }
+            }
+            if match_line_idx.is_some() {
+                break;
+            }
+        }
+    }
+
     let line_idx = match_line_idx.unwrap_or(0);
     let matched_raw_line = lines.get(line_idx).map(|l| l.trim()).unwrap_or("");
+    let needle_utf16_len = matched_needle.encode_utf16().count();
 
     let line_lower = matched_raw_line.to_lowercase();
-    let (display_text, highlight_range) = if let Some(byte_pos) = line_lower.find(&query_lower) {
+    let (display_text, highlight_range) = if let Some(byte_pos) = line_lower.find(&matched_needle) {
         let char_pos = matched_raw_line[..byte_pos].chars().count();
         let total_chars = matched_raw_line.chars().count();
 
         if total_chars > 65 {
             let window_start = char_pos.saturating_sub(18);
-            let window_end = (char_pos + trimmed_query.chars().count() + 35).min(total_chars);
+            let window_end = (char_pos + matched_needle.chars().count() + 35).min(total_chars);
             let prefix = if window_start > 0 { "…" } else { "" };
             let suffix = if window_end < total_chars { "…" } else { "" };
             let sub: String = matched_raw_line
@@ -669,12 +712,12 @@ fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
                 .take(char_pos - window_start)
                 .collect();
             let start_u16 = prefix_utf16 + sub_before_match.encode_utf16().count();
-            let end_u16 = start_u16 + query_utf16_len;
+            let end_u16 = start_u16 + needle_utf16_len;
 
             (final_str, Some((start_u16, end_u16)))
         } else {
             let start_u16 = matched_raw_line[..byte_pos].encode_utf16().count();
-            let end_u16 = start_u16 + query_utf16_len;
+            let end_u16 = start_u16 + needle_utf16_len;
             (matched_raw_line.to_string(), Some((start_u16, end_u16)))
         }
     } else {
@@ -1114,5 +1157,43 @@ impl UiState {
                 &brushes.accent,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_dummy_clip(id: &str, text: &str) -> ClipItem {
+        ClipItem {
+            id: id.to_string(),
+            text: text.to_string(),
+            is_favorite: false,
+            clip_type: "text".to_string(),
+            image_path: None,
+            image_width: None,
+            image_height: None,
+            ocr_text: None,
+            full_text_len: text.len(),
+        }
+    }
+
+    #[test]
+    fn test_set_clips_selection_best_match() {
+        let mut ui = UiState::new(std::path::PathBuf::from(".clipped"), AppSettings::default());
+        let items = vec![
+            make_dummy_clip("1", "first match"),
+            make_dummy_clip("2", "second match"),
+            make_dummy_clip("3", "third match"),
+        ];
+
+        // Simulate navigating to 3rd item
+        ui.set_clips(items.clone(), Some(2));
+        assert_eq!(ui.selected_index, 2);
+
+        // When searching, setting clips with Some(0) resets selection to best match (index 0)
+        ui.set_clips(items.clone(), Some(0));
+        assert_eq!(ui.selected_index, 0);
+        assert_eq!(ui.scroll_offset, 0.0);
     }
 }
