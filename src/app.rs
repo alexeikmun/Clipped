@@ -1,8 +1,8 @@
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use arboard::Clipboard;
@@ -36,12 +36,39 @@ use crate::ocr::extract_ocr_text;
 use crate::paste::perform_paste;
 
 const WM_TRAYICON: u32 = WM_USER + 1;
+const WM_RERANK_COMPLETE: u32 = WM_USER + 2;
 const HOTKEY_ID: i32 = 1;
 const TIMER_BLINK_ID: usize = 101;
+const TIMER_RERANK_DEBOUNCE_ID: usize = 102;
 
 const ID_TRAY_OPEN: usize = 1001;
 const ID_TRAY_SETTINGS: usize = 1002;
 const ID_TRAY_EXIT: usize = 1003;
+
+fn apply_rerank_completion(
+    ui: &mut crate::ui::UiState,
+    seq: u64,
+    current_seq: u64,
+    pending: &Mutex<Option<(u64, Vec<ClipItem>)>>,
+) {
+    if seq == 0 || seq != current_seq {
+        return;
+    }
+    ui.is_reranking = false;
+    let result = {
+        let mut lock = pending.lock().unwrap();
+        if lock.as_ref().is_some_and(|(stored_seq, _)| *stored_seq == seq) {
+            lock.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, clips)) = result {
+        ui.has_reranked = true;
+        ui.reranked_top_id = clips.first().map(|c| c.id.clone());
+        ui.set_clips(clips, Some(0));
+    }
+}
 
 pub struct AppState {
     pub hwnd: HWND,
@@ -58,6 +85,8 @@ pub struct AppState {
     pub last_text_hash: u128,
     pub last_image_hash: u128,
     pub ignore_blur_until: Instant,
+    pub search_sequence_id: Arc<AtomicU64>,
+    pub pending_rerank_results: Arc<Mutex<Option<(u64, Vec<ClipItem>)>>>,
 }
 
 impl AppState {
@@ -80,6 +109,8 @@ impl AppState {
             last_text_hash: 0,
             last_image_hash: 0,
             ignore_blur_until: Instant::now(),
+            search_sequence_id: Arc::new(AtomicU64::new(0)),
+            pending_rerank_results: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -98,6 +129,11 @@ impl AppState {
                 .unwrap_or_default();
             self.ui.mode = UiMode::SingleCard;
             self.ui.search_query.clear();
+            self.ui.is_reranking = false;
+            self.ui.has_reranked = false;
+            self.ui.reranked_top_id = None;
+            let _ = KillTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID);
+            self.search_sequence_id.fetch_add(1, Ordering::SeqCst);
             self.ui.set_clips(clips, Some(0));
 
             // Center window on primary monitor
@@ -123,9 +159,14 @@ impl AppState {
         unsafe {
             let is_visible = IsWindowVisible(self.hwnd).as_bool();
             if is_visible {
+                let _ = KillTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID);
+                self.search_sequence_id.fetch_add(1, Ordering::SeqCst);
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
                 self.ui.mode = UiMode::SingleCard;
                 self.ui.search_query.clear();
+                self.ui.is_reranking = false;
+                self.ui.has_reranked = false;
+                self.ui.reranked_top_id = None;
                 self.ui.hover_target = HitTarget::None;
 
                 // Evict cached Direct2D textures from VRAM/RAM
@@ -293,15 +334,26 @@ impl AppState {
     pub fn refresh_ui_clips_with_selection(&mut self, select_idx: Option<usize>) {
         unsafe {
             if IsWindowVisible(self.hwnd).as_bool() {
-                let is_search = !self.ui.search_query.is_empty();
-                let clips = if !is_search {
+                let raw_query = self.ui.search_query.trim();
+                let is_search = !raw_query.is_empty();
+                let semantic_query = crate::typesafe::semantic_query(raw_query);
+
+                let clips = if let Some(query) = semantic_query.filter(|q| !q.is_empty()) {
+                    if let Some(format) = crate::typesafe::requested_format(query) {
+                        self.db.get_semantic_candidates(Some(format), self.ui.show_favorites)
+                            .unwrap_or_default()
+                    } else {
+                        // Wait for semantic results instead of flashing unrelated keyword matches.
+                        Vec::new()
+                    }
+                } else if !is_search || semantic_query.is_some() {
                     self.db
                         .get_history(self.ui.settings.max_items, self.ui.show_favorites)
                         .unwrap_or_default()
                 } else {
                     self.db
                         .search_clips(
-                            &self.ui.search_query,
+                            raw_query,
                             self.ui.show_favorites,
                             self.ui.settings.max_items,
                         )
@@ -309,9 +361,116 @@ impl AppState {
                 };
                 let effective_idx = select_idx.or_else(|| if is_search { Some(0) } else { None });
                 self.ui.set_clips(clips, effective_idx);
+                self.schedule_rerank_debounce();
                 let _ = InvalidateRect(self.hwnd, None, false);
             }
         }
+    }
+
+    pub fn schedule_rerank_debounce(&mut self) {
+        // Invalidate in-flight work immediately, including during the debounce interval.
+        self.search_sequence_id.fetch_add(1, Ordering::SeqCst);
+        *self.pending_rerank_results.lock().unwrap() = None;
+        unsafe {
+            let _ = KillTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID);
+            self.ui.is_reranking = false;
+            self.ui.has_reranked = false;
+            self.ui.reranked_top_id = None;
+
+            let raw_query = self.ui.search_query.trim();
+            let semantic_query = crate::typesafe::semantic_query(raw_query);
+            let clean_query = semantic_query.unwrap_or("");
+
+            if semantic_query.is_some()
+                && self.ui.mode == UiMode::SearchList
+                && clean_query.chars().count() >= 2
+                && self.ui.settings.enable_semantic_search
+                && self.ui.settings.get_typesafe_key().is_some()
+            {
+                let _ = SetTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID, 300, None);
+            }
+        }
+    }
+
+    pub fn trigger_semantic_rerank(&mut self) {
+        if self.ui.mode != UiMode::SearchList {
+            return;
+        }
+        let raw_query = self.ui.search_query.trim();
+        let query = match crate::typesafe::semantic_query(raw_query) {
+            Some(query) => query.to_string(),
+            None => return,
+        };
+        if query.chars().count() < 2 {
+            return;
+        }
+        if !self.ui.settings.enable_semantic_search {
+            return;
+        }
+        let api_key = match self.ui.settings.get_typesafe_key() {
+            Some(k) => k,
+            None => return,
+        };
+
+        // Candidates are independent of FTS and include older requested formats.
+        let candidates = self
+            .db
+            .get_semantic_candidates(
+                crate::typesafe::requested_format(&query),
+                self.ui.show_favorites,
+            )
+            .unwrap_or_default();
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        let seq = self.search_sequence_id.fetch_add(1, Ordering::SeqCst) + 1;
+        self.ui.is_reranking = true;
+        unsafe {
+            let _ = InvalidateRect(self.hwnd, None, false);
+        }
+
+        let seq_id_arc = self.search_sequence_id.clone();
+        let pending_arc = self.pending_rerank_results.clone();
+        let hwnd_raw = self.hwnd.0 as isize;
+
+        std::thread::spawn(move || {
+            match crate::typesafe::rerank_candidates(&api_key, &query, &candidates) {
+                Ok(reranked) => {
+                    let is_current = {
+                        let mut lock = pending_arc.lock().unwrap();
+                        if seq_id_arc.load(Ordering::SeqCst) == seq {
+                            *lock = Some((seq, reranked));
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if is_current {
+                        unsafe {
+                            let _ = PostMessageW(
+                                HWND(hwnd_raw as *mut _),
+                                WM_RERANK_COMPLETE,
+                                WPARAM(seq as usize),
+                                LPARAM(0),
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("TypeSafe rerank error: {}", err);
+                    unsafe {
+                        let _ = PostMessageW(
+                            HWND(hwnd_raw as *mut _),
+                            WM_RERANK_COMPLETE,
+                            WPARAM(seq as usize),
+                            LPARAM(0),
+                        );
+                    }
+                }
+            }
+        });
     }
 
     pub fn paste_selected(&mut self) {
@@ -676,6 +835,9 @@ unsafe extern "system" fn wnd_proc(
                 if state.ui.mode == UiMode::SearchList && IsWindowVisible(hwnd).as_bool() {
                     let _ = InvalidateRect(hwnd, None, false);
                 }
+            } else if wparam.0 == TIMER_RERANK_DEBOUNCE_ID {
+                let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
+                state.trigger_semantic_rerank();
             }
             LRESULT(0)
         }
@@ -816,7 +978,12 @@ unsafe extern "system" fn wnd_proc(
                         state.ui.mode = UiMode::SingleCard;
                         let _ = InvalidateRect(hwnd, None, false);
                     } else if state.ui.mode == UiMode::SearchList {
+                        let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
+                        state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
                         state.ui.search_query.clear();
+                        state.ui.is_reranking = false;
+                        state.ui.has_reranked = false;
+                        state.ui.reranked_top_id = None;
                         state.ui.mode = UiMode::SingleCard;
                         state.refresh_ui_clips_with_selection(Some(0));
                     } else {
@@ -857,6 +1024,11 @@ unsafe extern "system" fn wnd_proc(
                     if state.ui.mode == UiMode::SearchList {
                         if state.ui.search_query.pop().is_some() {
                             if state.ui.search_query.is_empty() {
+                                let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
+                                state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
+                                state.ui.is_reranking = false;
+                                state.ui.has_reranked = false;
+                                state.ui.reranked_top_id = None;
                                 state.ui.mode = UiMode::SingleCard;
                                 state.refresh_ui_clips_with_selection(Some(0));
                             } else {
@@ -891,6 +1063,17 @@ unsafe extern "system" fn wnd_proc(
                 state.ui.search_query.push(ch);
                 state.refresh_ui_clips_with_selection(Some(0));
             }
+            LRESULT(0)
+        }
+
+        WM_RERANK_COMPLETE => {
+            apply_rerank_completion(
+                &mut state.ui,
+                wparam.0 as u64,
+                state.search_sequence_id.load(Ordering::SeqCst),
+                &state.pending_rerank_results,
+            );
+            let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
 
@@ -1070,6 +1253,49 @@ mod icon_tests {
     use super::*;
 
     #[test]
+    fn test_rerank_completion_replaces_list_and_ignores_stale_messages() {
+        let mut ui = crate::ui::UiState::new(PathBuf::new(), AppSettings::default());
+        ui.mode = UiMode::SearchList;
+        let text = ClipItem {
+            id: "text".into(),
+            text: "A page about images".into(),
+            is_favorite: false,
+            clip_type: "text".into(),
+            image_path: None,
+            image_width: None,
+            image_height: None,
+            ocr_text: None,
+            full_text_len: 19,
+        };
+        let image = ClipItem {
+            id: "image".into(),
+            clip_type: "image".into(),
+            ..text.clone()
+        };
+        ui.set_clips(vec![text], Some(0));
+        ui.is_reranking = true;
+        let pending = Mutex::new(Some((2, vec![image])));
+        apply_rerank_completion(&mut ui, 1, 2, &pending);
+        assert!(ui.is_reranking);
+        assert_eq!(ui.clips[0].id, "text");
+        assert!(pending.lock().unwrap().is_some());
+
+        apply_rerank_completion(&mut ui, 2, 2, &pending);
+        assert!(!ui.is_reranking);
+        assert!(ui.has_reranked);
+        assert_eq!(ui.clips.len(), 1);
+        assert_eq!(ui.clips[0].id, "image");
+        assert_eq!(ui.reranked_top_id.as_deref(), Some("image"));
+
+        *pending.lock().unwrap() = Some((3, Vec::new()));
+        apply_rerank_completion(&mut ui, 3, 3, &pending);
+        assert!(ui.clips.is_empty());
+        assert_eq!(ui.selected_index, 0);
+        assert_eq!(ui.scroll_offset, 0.0);
+        assert!(ui.reranked_top_id.is_none());
+    }
+
+    #[test]
     fn test_load_icon() {
         unsafe {
             let h_instance = GetModuleHandleW(None).unwrap();
@@ -1081,4 +1307,3 @@ mod icon_tests {
         }
     }
 }
-

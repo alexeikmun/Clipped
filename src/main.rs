@@ -7,6 +7,7 @@ mod model;
 mod ocr;
 mod paste;
 mod syntax;
+mod typesafe;
 mod ui;
 
 fn main() -> windows::core::Result<()> {

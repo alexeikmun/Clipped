@@ -490,6 +490,62 @@ impl Database {
         Ok(items)
     }
 
+    /// Scan by recency without FTS, reserving room for images even in text-heavy history.
+    pub fn get_semantic_candidates(
+        &self,
+        format: Option<&str>,
+        favorites_only: bool,
+    ) -> Result<Vec<ClipItem>> {
+        let conn = self.reader_conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+             FROM clips WHERE (?1 = 0 OR is_favorite = 1)
+             ORDER BY created_at DESC, rowid DESC"
+        )?;
+        let mut rows = stmt.query(params![favorites_only])?;
+        let mut items = Vec::new();
+        let (mut texts, mut images) = (0, 0);
+        while let Some(row) = rows.next()? {
+            let text: String = row.get(1)?;
+            let mut item = ClipItem {
+                id: row.get(0)?,
+                full_text_len: text.len(),
+                text,
+                is_favorite: row.get::<_, i32>(2)? != 0,
+                clip_type: row.get(3)?,
+                image_path: row.get(4)?,
+                image_width: row.get(5)?,
+                image_height: row.get(6)?,
+                ocr_text: row.get(7)?,
+            };
+            if let Some(format) = format {
+                if crate::typesafe::clip_format(&item) != format {
+                    continue;
+                }
+            } else if item.clip_type == "image" {
+                if images == 10 {
+                    continue;
+                }
+                images += 1;
+            } else {
+                if texts == 40 {
+                    continue;
+                }
+                texts += 1;
+            }
+            // Keep complete JSON for format detection; other previews remain bounded.
+            if crate::typesafe::clip_format(&item) != "JSON" {
+                item.text = truncate_preview(&item.text, MAX_PREVIEW_LEN);
+            }
+            item.ocr_text = item.ocr_text.map(|s| truncate_preview(&s, MAX_PREVIEW_LEN));
+            items.push(item);
+            if items.len() == 50 {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
     fn query_fts_ranked(
         conn: &Connection,
         fts_expr: &str,
@@ -598,6 +654,29 @@ impl Database {
             if let Ok(items) = Self::query_fts_ranked(&conn, &fts_expr, trimmed, favorites_only, limit) {
                 if !items.is_empty() {
                     return Ok(items);
+                }
+            }
+
+            // Priority 2b: If multi-word search returned 0 matches, strip conversational noise words (e.g. "show only json" -> "json")
+            const FILLER_WORDS: &[&str] = &[
+                "show", "only", "find", "get", "all", "me", "the", "my", "clips", "clip", "items", "item",
+            ];
+            let content_words: Vec<String> = clean_words
+                .iter()
+                .filter(|w| !FILLER_WORDS.contains(&w.to_lowercase().as_str()))
+                .cloned()
+                .collect();
+
+            if !content_words.is_empty() && content_words.len() < clean_words.len() {
+                let stripped_expr = content_words
+                    .iter()
+                    .map(|w| format!("\"{}\"*", w))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Ok(items) = Self::query_fts_ranked(&conn, &stripped_expr, trimmed, favorites_only, limit) {
+                    if !items.is_empty() {
+                        return Ok(items);
+                    }
                 }
             }
         }
@@ -786,6 +865,74 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("clipped_test_{}", Uuid::new_v4()));
         let _ = fs::create_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn test_semantic_candidates_include_buried_formats_and_respect_favorites() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).unwrap();
+        {
+            let conn = db.writer_conn.lock().unwrap();
+            for i in 0..30 {
+                conn.execute(
+                    "INSERT INTO clips (id, text, clip_type, is_favorite, created_at)
+                     VALUES (?1, '[Image]', 'image', ?2, ?3)",
+                    params![format!("image-{i}"), i == 29, i],
+                ).unwrap();
+            }
+            // Older format clips must not be lost behind the recent text window.
+            let long_json = format!(r#"{{"value":"{}"}}"#, "x".repeat(2000));
+            for (id, text) in [("json", long_json.as_str()), ("shell", "cargo test")] {
+                conn.execute(
+                    "INSERT INTO clips (id, text, created_at) VALUES (?1, ?2, -1)",
+                    params![id, text],
+                ).unwrap();
+            }
+            for i in 0..32 {
+                conn.execute(
+                    "INSERT INTO clips (id, text, is_favorite, created_at)
+                     VALUES (?1, 'A page about images', ?2, ?3)",
+                    params![format!("text-{i}"), i == 31, 100 + i],
+                ).unwrap();
+            }
+        }
+        assert!(db.get_history(25, false).unwrap().iter().all(|c| c.clip_type == "text"));
+        let pool = db.get_semantic_candidates(None, false).unwrap();
+        assert_eq!(pool.iter().filter(|c| c.clip_type == "image").count(), 10);
+        assert!(pool.iter().any(|c| c.id == "image-29"));
+        assert_eq!(pool.iter().map(|c| &c.id).collect::<HashSet<_>>().len(), pool.len());
+
+        for raw in ["show only images", "> show only images"] {
+            let query = crate::typesafe::semantic_query(raw).unwrap();
+            let items = db.get_semantic_candidates(
+                crate::typesafe::requested_format(query), false,
+            ).unwrap();
+            assert_eq!(items.len(), 30);
+            assert!(items.iter().all(|c| c.clip_type == "image"));
+        }
+        let favs = db.get_semantic_candidates(None, true).unwrap();
+        assert_eq!(favs.len(), 2);
+        assert!(favs.iter().all(|c| c.is_favorite));
+        let images = db.get_semantic_candidates(Some("image"), true).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].id, "image-29");
+
+        let json = db.get_semantic_candidates(Some("JSON"), false).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(crate::typesafe::clip_format(&json[0]), "JSON");
+        assert!(json[0].text.len() > MAX_PREVIEW_LEN);
+        let shell = db.get_semantic_candidates(Some("shell command"), false).unwrap();
+        assert_eq!(shell.len(), 1);
+        assert_eq!(shell[0].id, "shell");
+
+        for i in 0..60 {
+            db.save_or_bump_text(format!("recent {i}"), &format!("recent-{i}")).unwrap();
+        }
+        let pool = db.get_semantic_candidates(None, false).unwrap();
+        assert_eq!(pool.len(), 50);
+        assert_eq!(pool.iter().filter(|c| c.clip_type == "image").count(), 10);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

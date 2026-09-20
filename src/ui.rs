@@ -19,6 +19,9 @@ pub struct UiState {
     pub settings: AppSettings,
     pub settings_message: String,
     pub data_dir: PathBuf,
+    pub is_reranking: bool,
+    pub has_reranked: bool,
+    pub reranked_top_id: Option<String>,
 }
 
 impl UiState {
@@ -36,6 +39,9 @@ impl UiState {
             settings,
             settings_message: String::new(),
             data_dir,
+            is_reranking: false,
+            has_reranked: false,
+            reranked_top_id: None,
         }
     }
 
@@ -293,6 +299,13 @@ impl UiState {
         if is_search_mode {
             let search_x = star_x + star_slot_w + gap;
             let search_h = 24.0;
+            let is_jev_mode = crate::typesafe::semantic_query(&self.search_query).is_some();
+            let box_border = if is_jev_mode {
+                Some((&brushes.favorite, 1.2))
+            } else {
+                Some((&brushes.accent, 1.0))
+            };
+
             d2d.draw_rounded_rect(
                 search_x,
                 12.0,
@@ -300,25 +313,33 @@ impl UiState {
                 search_h,
                 6.0,
                 &brushes.search_bg,
-                Some((&brushes.accent, 1.0)),
+                box_border,
             );
 
             d2d.draw_search_icon(
                 search_x + 12.0,
                 24.0,
                 5.0,
-                &brushes.accent,
+                if is_jev_mode { &brushes.favorite } else { &brushes.accent },
             );
 
+            let badge_w = if is_jev_mode || self.is_reranking || self.has_reranked { 56.0 } else { 0.0 };
             let search_text_rect = D2D_RECT_F {
                 left: search_x + 24.0,
                 top: 12.0,
-                right: search_x + search_w - 8.0,
+                right: search_x + search_w - 8.0 - badge_w,
                 bottom: 12.0 + search_h,
             };
 
             if self.search_query.is_empty() {
-                d2d.draw_text("Type to search...", &formats.search, &search_text_rect, &brushes.text_muted);
+                d2d.draw_text("Type to search, or > for AI...", &formats.search, &search_text_rect, &brushes.text_muted);
+            } else if self.search_query == ">" {
+                let display_text = if self.cursor_visible {
+                    ">| Type AI query...".to_string()
+                } else {
+                    "> Type AI query...".to_string()
+                };
+                d2d.draw_text(&display_text, &formats.search, &search_text_rect, &brushes.favorite);
             } else {
                 let display_text = if self.cursor_visible {
                     format!("{}|", self.search_query)
@@ -326,6 +347,32 @@ impl UiState {
                     self.search_query.clone()
                 };
                 d2d.draw_text(&display_text, &formats.search, &search_text_rect, &brushes.text_primary);
+            }
+
+            if self.is_reranking {
+                let badge_rect = D2D_RECT_F {
+                    left: search_x + search_w - 56.0,
+                    top: 15.0,
+                    right: search_x + search_w - 6.0,
+                    bottom: 15.0 + search_h - 6.0,
+                };
+                d2d.draw_text("⚡ Jev...", &formats.small, &badge_rect, &brushes.accent);
+            } else if self.has_reranked {
+                let badge_rect = D2D_RECT_F {
+                    left: search_x + search_w - 48.0,
+                    top: 15.0,
+                    right: search_x + search_w - 6.0,
+                    bottom: 15.0 + search_h - 6.0,
+                };
+                d2d.draw_text("⚡ Jev", &formats.small, &badge_rect, &brushes.favorite);
+            } else if is_jev_mode {
+                let badge_rect = D2D_RECT_F {
+                    left: search_x + search_w - 48.0,
+                    top: 15.0,
+                    right: search_x + search_w - 6.0,
+                    bottom: 15.0 + search_h - 6.0,
+                };
+                d2d.draw_text("⚡ AI", &formats.small, &badge_rect, &brushes.favorite);
             }
         }
     }
@@ -879,7 +926,12 @@ impl UiState {
             }
 
             // Extract match snippet: exact matching line and context
-            let snippet = get_match_snippet(item, &self.search_query);
+            let clean_query = if crate::typesafe::semantic_query(&self.search_query).is_some() {
+                ""
+            } else {
+                self.search_query.trim()
+            };
+            let snippet = get_match_snippet(item, clean_query);
 
             let text_left = if is_image {
                 thumb_x + thumb_w + 10.0
@@ -919,11 +971,18 @@ impl UiState {
                 bottom: row_y + 46.0,
             };
 
+            let is_jev_top = self.has_reranked && self.reranked_top_id.as_deref() == Some(&item.id);
+            let display_secondary = if is_jev_top {
+                format!("⚡ Jev Match · {}", snippet.secondary)
+            } else {
+                snippet.secondary
+            };
+
             d2d.draw_text(
-                &snippet.secondary,
+                &display_secondary,
                 &formats.meta,
                 &secondary_rect,
-                &brushes.text_muted,
+                if is_jev_top { &brushes.accent } else { &brushes.text_muted },
             );
 
             // Right star indicator if favorite
