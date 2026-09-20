@@ -1,0 +1,11 @@
+PackageIdentifier: alexeikmun.Clipped
+PackageVersion: 0.7.0
+InstallerLocale: en-US
+MinimumOSVersion: 10.0.0.0
+InstallerType: nullsoft
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/alexeikmun/Clipped/blob/main/releases/download/clipped_0.7.0_x64-setup.exe
+    InstallerSha256: E1A63C489AC8602623225897CE48268437CDD4D2E518E31EC539BE00C990BE2D
+ManifestType: installer
+ManifestVersion: 1.6.0
