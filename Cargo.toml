@@ -1,13 +1,12 @@
 [package]
 name = "clipped"
-version = "0.5.0"
+version = "0.7.0"
 edition = "2021"
 default-run = "clipped"
 
 [dependencies]
-enigo = "0.6.1"
 arboard = "3.6.1"
-uuid = { version = "1.26.0", features = ["v4", "serde"] }
+uuid = { version = "1.26.0", features = ["v4"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "modern_sqlite"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

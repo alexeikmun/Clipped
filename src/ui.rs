@@ -57,7 +57,9 @@ impl UiState {
             self.selected_index = self.clips.len() - 1;
         }
         if self.clips.is_empty() {
+            self.selected_index = 0;
             self.scroll_offset = 0.0;
+            return;
         }
         self.ensure_selected_visible();
     }
@@ -69,13 +71,16 @@ impl UiState {
     pub fn ensure_selected_visible(&mut self) {
         if self.mode == UiMode::SearchList {
             let row_h = 56.0;
-            let list_h = 250.0;
+            let list_h = 260.0;
             let target_y = (self.selected_index as f32) * row_h;
             if target_y < self.scroll_offset {
                 self.scroll_offset = target_y;
             } else if target_y + row_h > self.scroll_offset + list_h {
                 self.scroll_offset = target_y + row_h - list_h;
             }
+            self.scroll_offset = self.scroll_offset.clamp(
+                0.0, (self.clips.len() as f32 * row_h - list_h).max(0.0),
+            );
         }
     }
 
@@ -86,10 +91,10 @@ impl UiState {
         }
 
         // Header controls (y: 8..40)
-        if y >= 8.0 && y <= 40.0 {
+        if (8.0..=40.0).contains(&y) {
             // Close button at top right in Settings mode
             if self.mode == UiMode::Settings {
-                if x >= 438.0 && x <= 470.0 {
+                if (438.0..=470.0).contains(&x) {
                     return HitTarget::CloseSettings;
                 }
             } else {
@@ -124,21 +129,21 @@ impl UiState {
         match self.mode {
             UiMode::Settings => {
                 // Launch on boot toggle: x: 24.0..456.0, y: 92.0..128.0
-                if x >= 24.0 && x <= 456.0 && y >= 92.0 && y <= 128.0 {
+                if (24.0..=456.0).contains(&x) && (92.0..=128.0).contains(&y) {
                     return HitTarget::SettingsBootToggle;
                 }
                 // Clear non-favorites: x: 24.0..234.0, y: 150.0..184.0
-                if x >= 24.0 && x <= 234.0 && y >= 150.0 && y <= 184.0 {
+                if (24.0..=234.0).contains(&x) && (150.0..=184.0).contains(&y) {
                     return HitTarget::ClearNonFavorites;
                 }
                 // Clear all: x: 246.0..456.0, y: 150.0..184.0
-                if x >= 246.0 && x <= 456.0 && y >= 150.0 && y <= 184.0 {
+                if (246.0..=456.0).contains(&x) && (150.0..=184.0).contains(&y) {
                     return HitTarget::ClearAll;
                 }
             }
             UiMode::SearchList => {
                 // List rows viewport: y: 48..308
-                if y >= 48.0 && y <= 308.0 && x >= 14.0 && x <= 466.0 {
+                if (48.0..=308.0).contains(&y) && (14.0..=466.0).contains(&x) {
                     let relative_y = y - 48.0 + self.scroll_offset;
                     let row_idx = (relative_y / 56.0).floor() as isize;
                     let row_local_y = relative_y - (row_idx as f32) * 56.0;
@@ -149,7 +154,7 @@ impl UiState {
             }
             UiMode::SingleCard => {
                 // Bottom dock: centered at bottom: x: 201..279, y: 318..348
-                if x >= 201.0 && x <= 279.0 && y >= 318.0 && y <= 348.0 && !self.clips.is_empty() {
+                if (201.0..=279.0).contains(&x) && (318.0..=348.0).contains(&y) && !self.clips.is_empty() {
                     if x <= 239.0 {
                         return HitTarget::DockTrash;
                     } else if x >= 241.0 {
@@ -438,7 +443,7 @@ impl UiState {
                     self.data_dir.join(p)
                 };
                 if let Some(full_str) = full.to_str() {
-                    if let Some(bmp) = d2d.get_or_load_bitmap(full_str) {
+                    if let Some(bmp) = d2d.get_or_load_bitmap(full_str, 512) {
                         d2d.draw_bitmap_contain(&bmp, card_x + 14.0, card_y + 14.0, card_w - 28.0, card_h - 48.0);
                         img_drawn = true;
                     }
@@ -577,6 +582,27 @@ struct MatchSnippet {
     pub secondary: String,
 }
 
+// Case conversion can change UTF-8 length. Map the folded match back to the
+// original character boundaries before slicing or computing DirectWrite offsets.
+fn folded_match(text: &str, needle: &str) -> Option<(usize, usize)> {
+    let folded = text.to_lowercase();
+    let start = folded.find(needle)?;
+    let end = start + needle.len();
+    let mut folded_offset = 0;
+    let mut original_start = None;
+    for (offset, ch) in text.char_indices() {
+        let next = folded_offset + ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+        if original_start.is_none() && next > start {
+            original_start = Some(offset);
+        }
+        if next >= end {
+            return Some((original_start?, offset + ch.len_utf8()));
+        }
+        folded_offset = next;
+    }
+    None
+}
+
 fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
     if item.clip_type == "image" {
         let dim = match (item.image_width, item.image_height) {
@@ -616,12 +642,9 @@ fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
                         }
                     }
                     let matched_line = ocr_lines.get(match_idx).map(|l| l.trim()).unwrap_or("");
-                    let line_lower = matched_line.to_lowercase();
-                    let needle_utf16_len = needle.encode_utf16().count();
-
-                    let (display_text, highlight_range) = if let Some(byte_pos) = line_lower.find(&needle) {
+                    let (display_text, highlight_range) = if let Some((byte_pos, byte_end)) = folded_match(matched_line, &needle) {
                         let start_u16 = matched_line[..byte_pos].encode_utf16().count();
-                        let end_u16 = start_u16 + needle_utf16_len;
+                        let end_u16 = matched_line[..byte_end].encode_utf16().count();
                         (matched_line.to_string(), Some((start_u16, end_u16)))
                     } else {
                         (matched_line.to_string(), None)
@@ -733,16 +756,14 @@ fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
 
     let line_idx = match_line_idx.unwrap_or(0);
     let matched_raw_line = lines.get(line_idx).map(|l| l.trim()).unwrap_or("");
-    let needle_utf16_len = matched_needle.encode_utf16().count();
-
-    let line_lower = matched_raw_line.to_lowercase();
-    let (display_text, highlight_range) = if let Some(byte_pos) = line_lower.find(&matched_needle) {
+    let (display_text, highlight_range) = if let Some((byte_pos, byte_end)) = folded_match(matched_raw_line, &matched_needle) {
+        let needle_utf16_len = matched_raw_line[byte_pos..byte_end].encode_utf16().count();
         let char_pos = matched_raw_line[..byte_pos].chars().count();
         let total_chars = matched_raw_line.chars().count();
 
         if total_chars > 65 {
             let window_start = char_pos.saturating_sub(18);
-            let window_end = (char_pos + matched_needle.chars().count() + 35).min(total_chars);
+            let window_end = (matched_raw_line[..byte_end].chars().count() + 35).min(total_chars);
             let prefix = if window_start > 0 { "…" } else { "" };
             let suffix = if window_end < total_chars { "…" } else { "" };
             let sub: String = matched_raw_line
@@ -833,6 +854,11 @@ impl UiState {
 
         d2d.push_clip(list_x, list_y, list_w, list_h);
 
+        let clean_query = if crate::typesafe::semantic_query(&self.search_query).is_some() {
+            ""
+        } else {
+            self.search_query.trim()
+        };
         for idx in start_idx..end_idx {
             let item = &self.clips[idx];
             let row_y = list_y + (idx as f32) * step - self.scroll_offset;
@@ -905,7 +931,7 @@ impl UiState {
                         self.data_dir.join(p)
                     };
                     if let Some(full_str) = full.to_str() {
-                        if let Some(bmp) = d2d.get_or_load_bitmap(full_str) {
+                        if let Some(bmp) = d2d.get_or_load_bitmap(full_str, 80) {
                             d2d.push_clip(thumb_x + 1.0, thumb_y + 1.0, thumb_w - 2.0, thumb_h - 2.0);
                             d2d.draw_bitmap_contain(&bmp, thumb_x + 1.0, thumb_y + 1.0, thumb_w - 2.0, thumb_h - 2.0);
                             d2d.pop_clip();
@@ -926,11 +952,6 @@ impl UiState {
             }
 
             // Extract match snippet: exact matching line and context
-            let clean_query = if crate::typesafe::semantic_query(&self.search_query).is_some() {
-                ""
-            } else {
-                self.search_query.trim()
-            };
             let snippet = get_match_snippet(item, clean_query);
 
             let text_left = if is_image {
@@ -1223,6 +1244,32 @@ impl UiState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn unicode_search_maps_original_boundaries() {
+        for text in ["\u{0130}\u{00e9}", "\u{023a}\u{00e9}", "\u{0130} needle", "emoji \u{1f600} needle"] {
+            let query = if text.ends_with("needle") { "needle" } else { "\u{00e9}" };
+            let mut item = make_dummy_clip("unicode", text);
+            let snippet = get_match_snippet(&item, query);
+            let (start, end) = snippet.primary_highlight.unwrap();
+            let units: Vec<_> = snippet.primary.encode_utf16().collect();
+            assert_eq!(String::from_utf16(&units[start..end]).unwrap(), query);
+            item.clip_type = "image".into();
+            item.ocr_text = Some(text.into());
+            assert!(get_match_snippet(&item, query).primary_highlight.is_some());
+        }
+    }
+
+    #[test]
+    fn empty_list_resets_selection_and_scroll() {
+        let mut ui = UiState::new(PathBuf::new(), AppSettings::default());
+        ui.mode = UiMode::SearchList;
+        ui.selected_index = 99;
+        ui.scroll_offset = 5000.0;
+        ui.set_clips(Vec::new(), None);
+        assert_eq!(ui.selected_index, 0);
+        assert_eq!(ui.scroll_offset, 0.0);
+    }
+
     fn make_dummy_clip(id: &str, text: &str) -> ClipItem {
         ClipItem {
             id: id.to_string(),
@@ -1254,5 +1301,39 @@ mod tests {
         ui.set_clips(items.clone(), Some(0));
         assert_eq!(ui.selected_index, 0);
         assert_eq!(ui.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn test_set_clips_preserves_selection_by_id_on_background_refresh() {
+        let mut ui = UiState::new(std::path::PathBuf::from(".clipped"), AppSettings::default());
+        let items = vec![
+            make_dummy_clip("1", "first match"),
+            make_dummy_clip("2", "second match"),
+            make_dummy_clip("3", "third match"),
+        ];
+
+        // User selected item 2 ("second match")
+        ui.set_clips(items.clone(), Some(1));
+        assert_eq!(ui.selected_index, 1);
+        assert_eq!(ui.selected_clip().unwrap().id, "2");
+
+        // Background update: new list where item "2" moved to index 2
+        let updated_items = vec![
+            make_dummy_clip("0", "new item"),
+            make_dummy_clip("1", "first match"),
+            make_dummy_clip("2", "second match (ocr updated)"),
+            make_dummy_clip("3", "third match"),
+        ];
+
+        // Preservation logic by ID:
+        let current_id = ui.selected_clip().map(|c| c.id.clone());
+        let effective_idx = current_id.as_ref().and_then(|id| {
+            updated_items.iter().position(|c| &c.id == id)
+        });
+        ui.set_clips(updated_items, effective_idx);
+
+        // Selection must track clip "2" at its new index 2
+        assert_eq!(ui.selected_index, 2);
+        assert_eq!(ui.selected_clip().unwrap().id, "2");
     }
 }

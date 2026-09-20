@@ -35,11 +35,8 @@ pub struct ClipItem {
 }
 
 fn truncate_preview(s: &str, max_len: usize) -> String {
-    if s.chars().count() > max_len {
-        s.chars().take(max_len).collect()
-    } else {
-        s.to_string()
-    }
+    let end = s.char_indices().nth(max_len).map_or(s.len(), |(i, _)| i);
+    s[..end].to_string()
 }
 
 pub struct Database {
@@ -48,7 +45,6 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
-#[allow(dead_code)]
 impl Database {
     pub fn init(data_dir: &Path) -> Result<Self> {
         let db_path = data_dir.join(DB_FILE);
@@ -82,8 +78,13 @@ impl Database {
             ",
         )?;
 
-        // Ensure content_hash column exists if upgrading from an older schema
-        let _ = writer_conn.execute("ALTER TABLE clips ADD COLUMN content_hash TEXT;", []);
+        if !writer_conn.prepare("PRAGMA table_info(clips)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>>>()?.iter().any(|name| name == "content_hash")
+        {
+            writer_conn.execute("ALTER TABLE clips ADD COLUMN content_hash TEXT;", [])?;
+        }
+        writer_conn.pragma_update(None, "recursive_triggers", true)?;
 
         // 2. Create B-tree indexes
         writer_conn.execute_batch(
@@ -94,11 +95,15 @@ impl Database {
             ",
         )?;
 
-        // 3. Configure FTS5 external content table and automatic synchronization triggers
-        writer_conn.execute_batch(
+        // Preserve the index across restarts; rebuild once for older installations.
+        let needs_rebuild = writer_conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))? < 1
+            || !writer_conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='clips_fts')",
+                [], |r| r.get::<_, bool>(0),
+            )?;
+        let tx = writer_conn.unchecked_transaction()?;
+        tx.execute_batch(
             "
-            DROP TABLE IF EXISTS clips_fts;
-
             CREATE VIRTUAL TABLE IF NOT EXISTS clips_fts USING fts5(
                 text,
                 ocr_text,
@@ -106,10 +111,6 @@ impl Database {
                 content_rowid='rowid',
                 tokenize='unicode61'
             );
-
-            -- Initial population for any pre-existing rows
-            INSERT INTO clips_fts(rowid, text, ocr_text)
-            SELECT rowid, text, COALESCE(ocr_text, '') FROM clips;
 
             -- Triggers to keep FTS index synced with zero Rust overhead
             DROP TRIGGER IF EXISTS clips_ai;
@@ -125,7 +126,8 @@ impl Database {
             END;
 
             DROP TRIGGER IF EXISTS clips_au;
-            CREATE TRIGGER clips_au AFTER UPDATE ON clips BEGIN
+            CREATE TRIGGER clips_au AFTER UPDATE OF text, ocr_text ON clips
+            WHEN old.text IS NOT new.text OR old.ocr_text IS NOT new.ocr_text BEGIN
                 INSERT INTO clips_fts(clips_fts, rowid, text, ocr_text)
                 VALUES('delete', old.rowid, old.text, COALESCE(old.ocr_text, ''));
                 INSERT INTO clips_fts(rowid, text, ocr_text)
@@ -133,6 +135,11 @@ impl Database {
             END;
             ",
         )?;
+        if needs_rebuild {
+            tx.execute("INSERT INTO clips_fts(clips_fts) VALUES('rebuild')", [])?;
+            tx.pragma_update(None, "user_version", 1)?;
+        }
+        tx.commit()?;
 
         let db = Database {
             writer_conn: Mutex::new(writer_conn),
@@ -141,13 +148,19 @@ impl Database {
         };
 
         // Migrate legacy clipboard_history.json if present
-        db.migrate_legacy_history();
+        if let Err(err) = db.migrate_legacy_history() {
+            eprintln!("Legacy history import failed; source retained: {err}");
+        }
 
         Ok(db)
     }
 
     /// P1: Startup orphan image file reconciliation
     pub fn reconcile_orphaned_images(&self) {
+        if self.data_dir.join(LEGACY_HISTORY_FILE).exists() {
+            return;
+        }
+
         let images_dir = self.data_dir.join("images");
         if !images_dir.exists() {
             return;
@@ -161,14 +174,15 @@ impl Database {
             return;
         };
 
+        let indexed: HashSet<_> = indexed.iter().map(|p| {
+            let p = Path::new(p);
+            self.data_dir.join(p).to_string_lossy().replace('\\', "/").to_lowercase()
+        }).collect();
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                let norm = path.to_string_lossy().replace('\\', "/");
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let is_indexed = indexed.iter().any(|idx_path| {
-                    idx_path == &norm || (!file_name.is_empty() && idx_path.ends_with(file_name))
-                });
+            if path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
+                let norm = path.to_string_lossy().replace('\\', "/").to_lowercase();
+                let is_indexed = indexed.contains(&norm);
                 if !is_indexed {
                     let _ = fs::remove_file(&path);
                 }
@@ -183,31 +197,29 @@ impl Database {
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut paths = HashSet::new();
-        for p in rows.flatten() {
-            paths.insert(p.replace('\\', "/"));
+        for p in rows {
+            paths.insert(p?.replace('\\', "/"));
         }
         Ok(paths)
     }
 
-    fn migrate_legacy_history(&self) {
+    fn migrate_legacy_history(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let legacy_path = self.data_dir.join(LEGACY_HISTORY_FILE);
         if !legacy_path.exists() {
-            return;
+            return Ok(());
         }
 
-        let Ok(content) = fs::read_to_string(&legacy_path) else {
-            return;
-        };
+        let content = fs::read_to_string(&legacy_path)?;
 
-        let mut items: Vec<ClipItem> = Vec::new();
-
-        if let Ok(parsed) = serde_json::from_str::<Vec<ClipItem>>(&content) {
-            items = parsed;
+        let items: Vec<ClipItem> = if let Ok(parsed) = serde_json::from_str::<Vec<ClipItem>>(&content) {
+            parsed
         } else if let Ok(old_strings) = serde_json::from_str::<Vec<String>>(&content) {
-            items = old_strings
+            old_strings
                 .into_iter()
-                .map(|text| ClipItem {
-                    id: Uuid::new_v4().to_string(),
+                .enumerate()
+                .map(|(idx, text)| ClipItem {
+                    // Stable IDs make retries safe if commit succeeded but rename failed.
+                    id: format!("legacy-{idx}-{:032x}", xxhash_rust::xxh3::xxh3_128(text.as_bytes())),
                     text,
                     is_favorite: false,
                     clip_type: "text".to_string(),
@@ -217,13 +229,15 @@ impl Database {
                     ocr_text: None,
                     full_text_len: 0,
                 })
-                .collect();
-        }
+                .collect()
+        } else {
+            return Err("Unrecognized legacy history JSON".into());
+        };
 
         if !items.is_empty() {
             let conn = self.writer_conn.lock().unwrap();
-            let tx = conn.unchecked_transaction();
-            if let Ok(tx) = tx {
+            let tx = conn.unchecked_transaction()?;
+            {
                 let base_time = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -232,7 +246,7 @@ impl Database {
                 let count = items.len();
                 for (idx, item) in items.into_iter().enumerate() {
                     let timestamp = base_time - ((count - idx) as i64 * 10);
-                    let _ = tx.execute(
+                    tx.execute(
                         "INSERT OR IGNORE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
                         params![
@@ -246,14 +260,15 @@ impl Database {
                             item.ocr_text,
                             timestamp
                         ],
-                    );
+                    )?;
                 }
-                let _ = tx.commit();
+                tx.commit()?;
             }
         }
 
         let migrated_path = self.data_dir.join(format!("{}.migrated", LEGACY_HISTORY_FILE));
-        let _ = fs::rename(&legacy_path, &migrated_path);
+        fs::rename(&legacy_path, &migrated_path)?;
+        Ok(())
     }
 
     /// Saves a text clip, or bumps an existing clip to the top via indexed 128-bit hash
@@ -299,7 +314,7 @@ impl Database {
         let text_len = text.len();
         let new_item = ClipItem {
             id: id.clone(),
-            text: text.clone(),
+            text,
             is_favorite: false,
             clip_type: "text".to_string(),
             image_path: None,
@@ -398,6 +413,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn insert_clip(&self, item: &ClipItem) -> Result<()> {
         let conn = self.writer_conn.lock().unwrap();
         let timestamp = SystemTime::now()
@@ -424,31 +440,12 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_latest_item(&self) -> Result<Option<ClipItem>> {
-        let conn = self.reader_conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
-             FROM clips ORDER BY created_at DESC LIMIT 1"
+    pub fn update_ocr(&self, id: &str, text: &str) -> Result<()> {
+        self.writer_conn.lock().unwrap().execute(
+            "UPDATE clips SET ocr_text = ?1 WHERE id = ?2 AND clip_type = 'image'",
+            params![text, id],
         )?;
-
-        let mut rows = stmt.query([])?;
-        if let Some(row) = rows.next()? {
-            let full_text: String = row.get(1)?;
-            let ocr: Option<String> = row.get(7)?;
-            Ok(Some(ClipItem {
-                id: row.get(0)?,
-                text: full_text.clone(),
-                is_favorite: row.get::<_, i32>(2)? != 0,
-                clip_type: row.get(3)?,
-                image_path: row.get(4)?,
-                image_width: row.get(5)?,
-                image_height: row.get(6)?,
-                ocr_text: ocr,
-                full_text_len: full_text.len(),
-            }))
-        } else {
-            Ok(None)
-        }
+        Ok(())
     }
 
     pub fn get_history(&self, limit: usize, favorites_only: bool) -> Result<Vec<ClipItem>> {
@@ -581,8 +578,8 @@ impl Database {
              LIMIT ?2"
         };
 
-        if let Ok(mut stmt) = conn.prepare(fts_sql) {
-            let rows_res = stmt.query_map(params![fts_expr, limit as i64, trimmed_query], |row| {
+        let mut stmt = conn.prepare(fts_sql)?;
+            let rows = stmt.query_map(params![fts_expr, limit as i64, trimmed_query], |row| {
                 let full_text: String = row.get(1)?;
                 let text_len = full_text.len();
                 let preview_text = truncate_preview(&full_text, MAX_PREVIEW_LEN);
@@ -600,17 +597,8 @@ impl Database {
                     ocr_text: preview_ocr,
                     full_text_len: text_len,
                 })
-            });
-
-            if let Ok(rows) = rows_res {
-                let mut items = Vec::new();
-                for item in rows.flatten() {
-                    items.push(item);
-                }
-                return Ok(items);
-            }
-        }
-        Ok(Vec::new())
+            })?;
+        rows.collect()
     }
 
     pub fn search_clips(&self, query: &str, favorites_only: bool, limit: usize) -> Result<Vec<ClipItem>> {
@@ -622,9 +610,7 @@ impl Database {
         let conn = self.reader_conn.lock().unwrap();
 
         // 1. Build sanitized FTS5 tokens
-        let words: Vec<&str> = trimmed.split_whitespace().collect();
-        let clean_words: Vec<String> = words
-            .iter()
+        let clean_words: Vec<String> = trimmed.split_whitespace()
             .map(|w| {
                 w.chars()
                     .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
@@ -637,7 +623,8 @@ impl Database {
             // Priority 1: If multi-word, try contiguous phrase prefix first ("by co"*)
             if clean_words.len() > 1 {
                 let phrase_expr = format!("\"{}\"*", clean_words.join(" "));
-                if let Ok(items) = Self::query_fts_ranked(&conn, &phrase_expr, trimmed, favorites_only, limit) {
+                {
+                    let items = Self::query_fts_ranked(&conn, &phrase_expr, trimmed, favorites_only, limit)?;
                     if !items.is_empty() {
                         return Ok(items);
                     }
@@ -651,7 +638,8 @@ impl Database {
                 .collect::<Vec<_>>()
                 .join(" ");
 
-            if let Ok(items) = Self::query_fts_ranked(&conn, &fts_expr, trimmed, favorites_only, limit) {
+            {
+                let items = Self::query_fts_ranked(&conn, &fts_expr, trimmed, favorites_only, limit)?;
                 if !items.is_empty() {
                     return Ok(items);
                 }
@@ -673,7 +661,8 @@ impl Database {
                     .map(|w| format!("\"{}\"*", w))
                     .collect::<Vec<_>>()
                     .join(" ");
-                if let Ok(items) = Self::query_fts_ranked(&conn, &stripped_expr, trimmed, favorites_only, limit) {
+                {
+                    let items = Self::query_fts_ranked(&conn, &stripped_expr, trimmed, favorites_only, limit)?;
                     if !items.is_empty() {
                         return Ok(items);
                     }
@@ -682,11 +671,12 @@ impl Database {
         }
 
         // Priority 3: Fallback to LIKE substring search for punctuation, code syntax, or zero FTS results
-        let like_pattern = format!("%{}%", trimmed);
+        let escaped = trimmed.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let like_pattern = format!("%{}%", escaped);
         let like_sql = if favorites_only {
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
              FROM clips
-             WHERE (text LIKE ?1 OR (ocr_text IS NOT NULL AND ocr_text LIKE ?1)) AND is_favorite = 1
+             WHERE (text LIKE ?1 ESCAPE '\\' OR (ocr_text IS NOT NULL AND ocr_text LIKE ?1 ESCAPE '\\')) AND is_favorite = 1
              ORDER BY
                CASE
                  WHEN (text LIKE ?3 || '%' OR (ocr_text IS NOT NULL AND ocr_text LIKE ?3 || '%')) THEN 0
@@ -696,7 +686,7 @@ impl Database {
         } else {
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
              FROM clips
-             WHERE (text LIKE ?1 OR (ocr_text IS NOT NULL AND ocr_text LIKE ?1))
+             WHERE (text LIKE ?1 ESCAPE '\\' OR (ocr_text IS NOT NULL AND ocr_text LIKE ?1 ESCAPE '\\'))
              ORDER BY
                CASE
                  WHEN (text LIKE ?3 || '%' OR (ocr_text IS NOT NULL AND ocr_text LIKE ?3 || '%')) THEN 0
@@ -838,8 +828,8 @@ impl Database {
         let mut stmt = conn.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut deleted_images = Vec::new();
-        for p in rows.flatten() {
-            deleted_images.push(p);
+        for p in rows {
+            deleted_images.push(p?);
         }
 
         conn.execute("DELETE FROM clips", [])?;
@@ -860,6 +850,72 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fts_survives_restart_replacement_and_metadata_updates() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).unwrap();
+        let mut item = db.save_or_bump_text("original token".into(), "hash").unwrap();
+        item.text = "replacement token".into();
+        db.insert_clip(&item).unwrap();
+        assert!(db.search_clips("original", false, 10).unwrap().is_empty());
+        assert_eq!(db.search_clips("replacement", false, 10).unwrap().len(), 1);
+        db.toggle_favorite(&item.id).unwrap();
+        db.bump_clip_timestamp(&item.id).unwrap();
+        db.writer_conn.lock().unwrap().execute(
+            "INSERT INTO clips_fts(clips_fts, rank) VALUES('integrity-check', 1)", [],
+        ).unwrap();
+        let before: i64 = db.reader_conn.lock().unwrap().query_row(
+            "SELECT sum(length(block)) FROM clips_fts_data", [], |r| r.get(0),
+        ).unwrap();
+        drop(db);
+        let db = Database::init(&dir).unwrap();
+        let after: i64 = db.reader_conn.lock().unwrap().query_row(
+            "SELECT sum(length(block)) FROM clips_fts_data", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(db.search_clips("replacement", true, 10).unwrap().len(), 1);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_legacy_import_retains_source_and_rolls_back() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).unwrap();
+        let path = dir.join(LEGACY_HISTORY_FILE);
+        fs::write(&path, "invalid").unwrap();
+        assert!(db.migrate_legacy_history().is_err());
+        assert!(path.exists());
+        fs::write(&path, r#"["first","second"]"#).unwrap();
+        db.writer_conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_second BEFORE INSERT ON clips WHEN new.text='second'
+             BEGIN SELECT RAISE(ABORT, 'test failure'); END;"
+        ).unwrap();
+        assert!(db.migrate_legacy_history().is_err());
+        assert!(db.get_history(10, false).unwrap().is_empty());
+        assert!(path.exists());
+        db.writer_conn.lock().unwrap().execute_batch("DROP TRIGGER reject_second").unwrap();
+        db.migrate_legacy_history().unwrap();
+        // A rename failure/retry must not duplicate string-only history.
+        fs::rename(dir.join(format!("{LEGACY_HISTORY_FILE}.migrated")), &path).unwrap();
+        db.migrate_legacy_history().unwrap();
+        assert_eq!(db.get_history(10, false).unwrap().len(), 2);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn punctuation_search_is_literal() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).unwrap();
+        db.save_or_bump_text("100% complete".into(), "percent").unwrap();
+        db.save_or_bump_text("unrelated".into(), "other").unwrap();
+        assert_eq!(db.search_clips("%", false, 10).unwrap().len(), 1);
+        assert!(db.search_clips("_", false, 10).unwrap().is_empty());
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn temp_db_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("clipped_test_{}", Uuid::new_v4()));
@@ -1098,6 +1154,28 @@ mod tests {
         // Valid file stays, orphan file is removed!
         assert!(valid_file.exists());
         assert!(!orphan_file.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_reconcile_orphaned_images_skips_when_legacy_history_present() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).unwrap();
+        let images_dir = dir.join("images");
+        fs::create_dir_all(&images_dir).unwrap();
+        let orphan_file = images_dir.join("orphan.png");
+        fs::write(&orphan_file, b"orphan").unwrap();
+
+        // Create unmigrated legacy history file
+        let legacy_file = dir.join(LEGACY_HISTORY_FILE);
+        fs::write(&legacy_file, b"corrupt json").unwrap();
+
+        // Run reconciliation
+        db.reconcile_orphaned_images();
+
+        // Orphan file must not be deleted while unmigrated legacy history is present
+        assert!(orphan_file.exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

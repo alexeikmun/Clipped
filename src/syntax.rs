@@ -60,21 +60,14 @@ pub fn detect_language(text: &str) -> Language {
     if trimmed.len() <= 32768
         && ((trimmed.starts_with('{') && trimmed.ends_with('}'))
             || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+        && serde_json::from_str::<serde::de::IgnoredAny>(trimmed).is_ok()
     {
-        if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
-            return Language::Json;
-        }
+        return Language::Json;
     }
 
     // 2. Shell command check
-    for cmd in SHELL_COMMANDS {
-        if trimmed.starts_with(&format!("{} ", cmd))
-            || trimmed == *cmd
-            || trimmed.starts_with(&format!("$ {} ", cmd))
-            || trimmed.starts_with(&format!("$ {}", cmd))
-        {
-            return Language::Shell;
-        }
+    if trimmed.split_whitespace().next().is_some_and(|word| SHELL_COMMANDS.contains(&word)) {
+        return Language::Shell;
     }
     if trimmed.starts_with("$ ") || trimmed.starts_with("# ") {
         return Language::Shell;
@@ -231,9 +224,8 @@ pub fn tokenize(text: &str) -> Vec<SyntaxToken> {
             }
             while i < len {
                 let ch = chars[i];
-                if is_hex && ch.is_ascii_hexdigit() {
-                    i += 1;
-                } else if !is_hex && (ch.is_ascii_digit() || ch == '.' || ch == '_') {
+                if (is_hex && ch.is_ascii_hexdigit())
+                    || (!is_hex && (ch.is_ascii_digit() || ch == '.' || ch == '_')) {
                     i += 1;
                 } else {
                     break;
@@ -284,7 +276,7 @@ pub fn tokenize(text: &str) -> Vec<SyntaxToken> {
                 TokenKind::Function
             } else if is_prop {
                 TokenKind::Property
-            } else if word.chars().next().map_or(false, |ch| ch.is_uppercase()) {
+            } else if word.chars().next().is_some_and(|ch| ch.is_uppercase()) {
                 TokenKind::Type
             } else {
                 continue;

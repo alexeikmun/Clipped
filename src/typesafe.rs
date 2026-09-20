@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Networking::WinHttp::*;
@@ -9,6 +10,7 @@ use crate::db::ClipItem;
 const TYPESAFE_HOST: PCWSTR = w!("api.typesafe.ai");
 const TYPESAFE_PATH: PCWSTR = w!("/v1/systemone");
 const JEV_MODEL: &str = "jev-latest";
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Serialize, Debug)]
 pub struct JevRequest<'a> {
@@ -64,6 +66,10 @@ impl Drop for WinHttpHandle {
 }
 
 pub fn post_system_one(api_key: &str, body_json: &str) -> Result<String, String> {
+    if api_key.trim().is_empty() || api_key.chars().any(char::is_control) {
+        return Err("Invalid TypeSafe API key".into());
+    }
+    let started = Instant::now();
     unsafe {
         let session = WinHttpOpen(
             w!("Clipped/0.5 (Windows NT)"),
@@ -103,7 +109,13 @@ pub fn post_system_one(api_key: &str, body_json: &str) -> Result<String, String>
         let request_guard = WinHttpHandle(request);
 
         // Set reasonable timeouts: 4s resolve, 4s connect, 5s send, 8s receive
-        let _ = WinHttpSetTimeouts(request_guard.0, 4000, 4000, 5000, 8000);
+        WinHttpSetTimeouts(request_guard.0, 4000, 4000, 5000, 8000)
+            .map_err(|e| format!("Could not configure HTTP timeouts: {e}"))?;
+        let redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        WinHttpSetOption(
+            Some(request_guard.0), WINHTTP_OPTION_REDIRECT_POLICY,
+            Some(&redirect_policy.to_ne_bytes()),
+        ).map_err(|e| format!("Could not disable redirects: {e}"))?;
 
         let auth_header = format!(
             "Authorization: Bearer {}\r\nContent-Type: application/json\r\n",
@@ -112,7 +124,7 @@ pub fn post_system_one(api_key: &str, body_json: &str) -> Result<String, String>
         let wide_headers: Vec<u16> = auth_header.encode_utf16().collect();
 
         let body_bytes = body_json.as_bytes();
-        let body_len = body_bytes.len() as u32;
+        let body_len = u32::try_from(body_bytes.len()).map_err(|_| "Request body too large")?;
 
         if WinHttpSendRequest(
             request_guard.0,
@@ -149,9 +161,12 @@ pub fn post_system_one(api_key: &str, body_json: &str) -> Result<String, String>
         let mut response_bytes = Vec::new();
         let mut buffer = [0u8; 8192];
         loop {
+            if started.elapsed() > Duration::from_secs(20) {
+                return Err("TypeSafe response deadline exceeded".into());
+            }
             let mut bytes_available: u32 = 0;
             if WinHttpQueryDataAvailable(request_guard.0, &mut bytes_available).is_err() {
-                break;
+                return Err("Failed to query HTTP response data".into());
             }
             if bytes_available == 0 {
                 break;
@@ -166,16 +181,24 @@ pub fn post_system_one(api_key: &str, body_json: &str) -> Result<String, String>
             )
             .is_err()
             {
-                break;
+                return Err("Failed to read HTTP response data".into());
             }
             if bytes_read == 0 {
                 break;
             }
-            response_bytes.extend_from_slice(&buffer[..bytes_read as usize]);
+            append_response(&mut response_bytes, &buffer[..bytes_read as usize])?;
         }
 
         String::from_utf8(response_bytes).map_err(|e| format!("Invalid UTF-8 response: {}", e))
     }
+}
+
+fn append_response(response: &mut Vec<u8>, chunk: &[u8]) -> Result<(), String> {
+    if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(response.len()) {
+        return Err("TypeSafe response exceeded 1 MiB".into());
+    }
+    response.extend_from_slice(chunk);
+    Ok(())
 }
 
 pub fn semantic_query(raw: &str) -> Option<&str> {
@@ -285,6 +308,11 @@ pub fn rerank_candidates(
     let resp_str = post_system_one(api_key, &body_json)?;
     let parsed: JevResponse = serde_json::from_str(&resp_str)
         .map_err(|e| format!("JSON deserialize error: {}", e))?;
+    if !matches!(parsed.answers.get("best_match"), Some(JevAnswer::Choice(_)))
+        && !matches!(parsed.answers.get("has_match"), Some(JevAnswer::Noul(_)))
+    {
+        return Err("TypeSafe response contains no ranking answers".into());
+    }
 
     Ok(apply_rerank_response(&candidates, &parsed))
 }
@@ -344,6 +372,14 @@ fn apply_rerank_response(candidates: &[ClipItem], parsed: &JevResponse) -> Vec<C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_size_is_bounded() {
+        let mut response = vec![0; MAX_RESPONSE_BYTES - 2];
+        append_response(&mut response, b"ok").unwrap();
+        assert!(append_response(&mut response, b"x").is_err());
+        assert_eq!(response.len(), MAX_RESPONSE_BYTES);
+    }
 
     fn clip(id: usize, image: bool) -> ClipItem {
         ClipItem {

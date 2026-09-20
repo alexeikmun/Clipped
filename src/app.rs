@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,11 +32,12 @@ use crate::db::{ClipItem, Database};
 use crate::model::{
     AppSettings, HitTarget, UiMode, SETTINGS_FILE, WINDOW_HEIGHT, WINDOW_WIDTH,
 };
-use crate::ocr::extract_ocr_text;
 use crate::paste::perform_paste;
 
 const WM_TRAYICON: u32 = WM_USER + 1;
 const WM_RERANK_COMPLETE: u32 = WM_USER + 2;
+pub(crate) const WM_OCR_COMPLETE: u32 = WM_USER + 3;
+const WM_ACTIVATE_INSTANCE: u32 = WM_USER + 4;
 const HOTKEY_ID: i32 = 1;
 const TIMER_BLINK_ID: usize = 101;
 const TIMER_RERANK_DEBOUNCE_ID: usize = 102;
@@ -44,12 +45,13 @@ const TIMER_RERANK_DEBOUNCE_ID: usize = 102;
 const ID_TRAY_OPEN: usize = 1001;
 const ID_TRAY_SETTINGS: usize = 1002;
 const ID_TRAY_EXIT: usize = 1003;
+type RerankResults = Mutex<Option<(u64, Vec<ClipItem>)>>;
 
 fn apply_rerank_completion(
     ui: &mut crate::ui::UiState,
     seq: u64,
     current_seq: u64,
-    pending: &Mutex<Option<(u64, Vec<ClipItem>)>>,
+    pending: &RerankResults,
 ) {
     if seq == 0 || seq != current_seq {
         return;
@@ -74,19 +76,22 @@ pub struct AppState {
     pub hwnd: HWND,
     pub d2d: D2dContext,
     pub ui: crate::ui::UiState,
-    pub db: Database,
+    pub db: Arc<Database>,
+    ocr_jobs: Option<std::sync::mpsc::SyncSender<(String, PathBuf)>>,
     pub is_monitoring: Arc<AtomicBool>,
     pub previous_foreground: AtomicIsize,
     pub dpi_scale: f32,
     pub app_icon_big: HICON,
     pub app_icon_sm: HICON,
     pub nid: NOTIFYICONDATAW,
-    pub _hotkey_id: i32,
     pub last_text_hash: u128,
     pub last_image_hash: u128,
     pub ignore_blur_until: Instant,
     pub search_sequence_id: Arc<AtomicU64>,
-    pub pending_rerank_results: Arc<Mutex<Option<(u64, Vec<ClipItem>)>>>,
+    pub pending_rerank_results: Arc<RerankResults>,
+    rerank_in_flight: bool,
+    rerank_requested: bool,
+    pending_surrogate: Option<u16>,
 }
 
 impl AppState {
@@ -98,23 +103,26 @@ impl AppState {
             hwnd: HWND(0 as _),
             d2d,
             ui,
-            db,
+            db: Arc::new(db),
+            ocr_jobs: None,
             is_monitoring: Arc::new(AtomicBool::new(true)),
             previous_foreground: AtomicIsize::new(0),
             dpi_scale: 1.0,
             app_icon_big: HICON::default(),
             app_icon_sm: HICON::default(),
             nid: NOTIFYICONDATAW::default(),
-            _hotkey_id: HOTKEY_ID,
             last_text_hash: 0,
             last_image_hash: 0,
             ignore_blur_until: Instant::now(),
             search_sequence_id: Arc::new(AtomicU64::new(0)),
             pending_rerank_results: Arc::new(Mutex::new(None)),
+            rerank_in_flight: false,
+            rerank_requested: false,
+            pending_surrogate: None,
         })
     }
 
-    pub fn show_modal(&mut self) {
+    pub fn prepare_show(&mut self) {
         unsafe {
             // Save foreground window so we know where to paste back later
             let fg = GetForegroundWindow();
@@ -129,6 +137,10 @@ impl AppState {
                 .unwrap_or_default();
             self.ui.mode = UiMode::SingleCard;
             self.ui.search_query.clear();
+            self.pending_surrogate = None;
+            self.rerank_requested = false;
+            *self.pending_rerank_results.lock().unwrap() = None;
+            let _ = KillTimer(self.hwnd, TIMER_BLINK_ID);
             self.ui.is_reranking = false;
             self.ui.has_reranked = false;
             self.ui.reranked_top_id = None;
@@ -136,50 +148,12 @@ impl AppState {
             self.search_sequence_id.fetch_add(1, Ordering::SeqCst);
             self.ui.set_clips(clips, Some(0));
 
-            // Center window on primary monitor
-            self.center_window();
-
             // Ignore blur for 250ms to allow smooth focus transition
             self.ignore_blur_until = Instant::now() + std::time::Duration::from_millis(250);
-
-            let _ = ShowWindow(self.hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(self.hwnd);
-            let _ = SetFocus(self.hwnd);
-
-            let _ = InvalidateRect(self.hwnd, None, false);
         }
     }
 
-    pub fn show_settings(&mut self) {
-        self.ui.mode = UiMode::Settings;
-        self.show_modal();
-    }
-
-    pub fn hide_modal(&mut self) {
-        unsafe {
-            let is_visible = IsWindowVisible(self.hwnd).as_bool();
-            if is_visible {
-                let _ = KillTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID);
-                self.search_sequence_id.fetch_add(1, Ordering::SeqCst);
-                let _ = ShowWindow(self.hwnd, SW_HIDE);
-                self.ui.mode = UiMode::SingleCard;
-                self.ui.search_query.clear();
-                self.ui.is_reranking = false;
-                self.ui.has_reranked = false;
-                self.ui.reranked_top_id = None;
-                self.ui.hover_target = HitTarget::None;
-
-                // Evict cached Direct2D textures from VRAM/RAM
-                self.d2d.clear_bitmap_cache();
-
-                // Memory trim on modal close
-                self.db.shrink_memory();
-                let _ = EmptyWorkingSet(GetCurrentProcess());
-            }
-        }
-    }
-
-    pub fn center_window(&self) {
+    pub fn calculate_window_rect(&self) -> (i32, i32, i32, i32) {
         unsafe {
             let width = (WINDOW_WIDTH * self.dpi_scale).round() as i32;
             let height = (WINDOW_HEIGHT * self.dpi_scale).round() as i32;
@@ -217,15 +191,7 @@ impl AppState {
                 ((screen_w - width) / 2, (screen_h - height) / 2)
             };
 
-            let _ = SetWindowPos(
-                self.hwnd,
-                HWND_TOPMOST,
-                x,
-                y,
-                width,
-                height,
-                SWP_NOACTIVATE | SWP_FRAMECHANGED,
-            );
+            (x, y, width, height)
         }
     }
 
@@ -239,19 +205,16 @@ impl AppState {
         };
 
         // 1. Try reading image
-        let mut image_handled = false;
         if let Ok(img) = clipboard.get_image() {
             let hash = xxh3_128(&img.bytes);
             if hash != self.last_image_hash {
-                self.last_image_hash = hash;
-                self.last_text_hash = 0;
-                image_handled = true;
-
                 let hash_str = format!("{:032x}", hash);
                 let (w, h) = (img.width as u32, img.height as u32);
 
                 if let Ok(Some(existing)) = self.db.find_image_by_hash(&hash_str) {
-                    let _ = self.db.bump_clip_timestamp(&existing.id);
+                    if self.db.bump_clip_timestamp(&existing.id).is_err() {
+                        return;
+                    }
                 } else {
                     let id = Uuid::new_v4().to_string();
                     let filename = format!("{}.png", id);
@@ -260,10 +223,9 @@ impl AppState {
                     let full_path = images_dir.join(&filename);
 
                     if save_image_fast_png(&full_path, &img.bytes, w, h).is_ok() {
-                        let ocr = extract_ocr_text(&full_path);
                         let full_path_str = full_path.to_string_lossy().replace('\\', "/");
                         let item = ClipItem {
-                            id,
+                            id: id.clone(),
                             text: format!("[Image {}x{}]", w, h),
                             full_text_len: 0,
                             is_favorite: false,
@@ -271,11 +233,23 @@ impl AppState {
                             image_path: Some(full_path_str),
                             image_width: Some(w),
                             image_height: Some(h),
-                            ocr_text: ocr,
+                            ocr_text: None,
                         };
-                        let _ = self.db.insert_image_clip(&item, &hash_str);
+                        if self.db.insert_image_clip(&item, &hash_str).is_err() {
+                            let _ = fs::remove_file(&full_path);
+                            return;
+                        }
+                        if let Some(jobs) = &self.ocr_jobs {
+                            // OCR is optional: keep the clip even if the bounded queue is full.
+                            let _ = jobs.try_send((id, full_path));
+                        }
+                    } else {
+                        let _ = fs::remove_file(&full_path);
+                        return;
                     }
                 }
+                self.last_image_hash = hash;
+                self.last_text_hash = 0;
 
                 // Prune
                 if let Ok(deleted) = self.db.prune_history(self.ui.settings.max_items) {
@@ -292,20 +266,22 @@ impl AppState {
 
                 self.refresh_ui_clips();
             }
+            return;
         }
 
         // 2. Try reading text if not an image
-        if !image_handled {
+        {
             if let Ok(text) = clipboard.get_text() {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     let hash = xxh3_128(text.as_bytes());
                     if hash != self.last_text_hash {
+                        let hash_str = format!("{:032x}", hash);
+                        if self.db.save_or_bump_text(text, &hash_str).is_err() {
+                            return;
+                        }
                         self.last_text_hash = hash;
                         self.last_image_hash = 0;
-
-                        let hash_str = format!("{:032x}", hash);
-                        let _ = self.db.save_or_bump_text(text, &hash_str);
 
                         // Prune
                         if let Ok(deleted) = self.db.prune_history(self.ui.settings.max_items) {
@@ -359,9 +335,15 @@ impl AppState {
                         )
                         .unwrap_or_default()
                 };
-                let effective_idx = select_idx.or_else(|| if is_search { Some(0) } else { None });
+                let current_id = self.ui.selected_clip().map(|c| c.id.clone());
+                let effective_idx = select_idx
+                    .or_else(|| {
+                        current_id.as_ref().and_then(|id| {
+                            clips.iter().position(|c| &c.id == id)
+                        })
+                    })
+                    .or(if is_search { Some(0) } else { None });
                 self.ui.set_clips(clips, effective_idx);
-                self.schedule_rerank_debounce();
                 let _ = InvalidateRect(self.hwnd, None, false);
             }
         }
@@ -370,8 +352,12 @@ impl AppState {
     pub fn schedule_rerank_debounce(&mut self) {
         // Invalidate in-flight work immediately, including during the debounce interval.
         self.search_sequence_id.fetch_add(1, Ordering::SeqCst);
+        self.rerank_requested = false;
         *self.pending_rerank_results.lock().unwrap() = None;
         unsafe {
+            if self.ui.mode != UiMode::SearchList {
+                let _ = KillTimer(self.hwnd, TIMER_BLINK_ID);
+            }
             let _ = KillTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID);
             self.ui.is_reranking = false;
             self.ui.has_reranked = false;
@@ -407,6 +393,10 @@ impl AppState {
         if !self.ui.settings.enable_semantic_search {
             return;
         }
+        if self.rerank_in_flight {
+            self.rerank_requested = true;
+            return;
+        }
         let api_key = match self.ui.settings.get_typesafe_key() {
             Some(k) => k,
             None => return,
@@ -427,6 +417,8 @@ impl AppState {
 
         let seq = self.search_sequence_id.fetch_add(1, Ordering::SeqCst) + 1;
         self.ui.is_reranking = true;
+        self.rerank_in_flight = true;
+        self.rerank_requested = false;
         unsafe {
             let _ = InvalidateRect(self.hwnd, None, false);
         }
@@ -435,62 +427,38 @@ impl AppState {
         let pending_arc = self.pending_rerank_results.clone();
         let hwnd_raw = self.hwnd.0 as isize;
 
-        std::thread::spawn(move || {
+        let spawned = std::thread::Builder::new().name("clipped-rerank".into()).spawn(move || {
             match crate::typesafe::rerank_candidates(&api_key, &query, &candidates) {
                 Ok(reranked) => {
-                    let is_current = {
+                    {
                         let mut lock = pending_arc.lock().unwrap();
                         if seq_id_arc.load(Ordering::SeqCst) == seq {
                             *lock = Some((seq, reranked));
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if is_current {
-                        unsafe {
-                            let _ = PostMessageW(
-                                HWND(hwnd_raw as *mut _),
-                                WM_RERANK_COMPLETE,
-                                WPARAM(seq as usize),
-                                LPARAM(0),
-                            );
                         }
                     }
                 }
                 Err(err) => {
                     eprintln!("TypeSafe rerank error: {}", err);
-                    unsafe {
-                        let _ = PostMessageW(
-                            HWND(hwnd_raw as *mut _),
-                            WM_RERANK_COMPLETE,
-                            WPARAM(seq as usize),
-                            LPARAM(0),
-                        );
-                    }
                 }
             }
+            unsafe {
+                let _ = PostMessageW(
+                    HWND(hwnd_raw as *mut _), WM_RERANK_COMPLETE,
+                    WPARAM(seq as usize), LPARAM(0),
+                );
+            }
         });
-    }
-
-    pub fn paste_selected(&mut self) {
-        if let Some(clip) = self.ui.selected_clip().cloned() {
-            let prev_hwnd = self.previous_foreground.load(Ordering::Relaxed);
-            let data_dir = self.ui.data_dir.clone();
-
-            // Fetch full clip from database to avoid truncating long clips
-            let clip_to_paste = self.db.get_full_clip(&clip.id).ok().flatten().unwrap_or(clip);
-
-            self.hide_modal();
-
-            let mon = self.is_monitoring.clone();
-            std::thread::spawn(move || {
-                perform_paste(&clip_to_paste, &data_dir, prev_hwnd, &mon);
-            });
+        if let Err(err) = spawned {
+            self.rerank_in_flight = false;
+            self.ui.is_reranking = false;
+            eprintln!("Could not start rerank: {err}");
         }
     }
 
     pub fn delete_selected(&mut self) {
+        if self.ui.mode == UiMode::Settings {
+            return;
+        }
         if let Some(clip) = self.ui.selected_clip() {
             let id = clip.id.clone();
             if let Ok(Some(img_path)) = self.db.delete_clip(&id) {
@@ -503,6 +471,9 @@ impl AppState {
                 let _ = fs::remove_file(full);
             }
             let curr_idx = self.ui.selected_index;
+            self.last_text_hash = 0;
+            self.last_image_hash = 0;
+            self.d2d.clear_bitmap_cache();
             self.refresh_ui_clips_with_selection(Some(curr_idx));
         }
     }
@@ -516,32 +487,145 @@ impl AppState {
         }
     }
 
-    pub fn show_tray_menu(&self) {
-        unsafe {
-            let hmenu = match CreatePopupMenu() {
-                Ok(m) => m,
-                Err(_) => return,
-            };
+}
 
-            let _ = AppendMenuW(hmenu, MF_STRING, ID_TRAY_OPEN, w!("Open Clipped"));
-            let _ = AppendMenuW(hmenu, MF_STRING, ID_TRAY_SETTINGS, w!("Settings"));
-            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(hmenu, MF_STRING, ID_TRAY_EXIT, w!("Exit"));
+unsafe fn show_modal(state_ptr: *mut AppState) {
+    if state_ptr.is_null() {
+        return;
+    }
+    let (hwnd, (x, y, width, height)) = {
+        let state = &mut *state_ptr;
+        state.prepare_show();
+        (state.hwnd, state.calculate_window_rect())
+    };
 
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
+    let _ = SetWindowPos(
+        hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        width,
+        height,
+        SWP_NOACTIVATE | SWP_FRAMECHANGED,
+    );
+    let _ = ShowWindow(hwnd, SW_SHOW);
+    let _ = SetForegroundWindow(hwnd);
+    let _ = SetFocus(hwnd);
+    let _ = InvalidateRect(hwnd, None, false);
+}
 
-            let _ = SetForegroundWindow(self.hwnd);
-            let _ = TrackPopupMenuEx(
-                hmenu,
-                (TPM_RIGHTBUTTON | TPM_BOTTOMALIGN).0 as u32,
-                pt.x,
-                pt.y,
-                self.hwnd,
-                None,
-            );
-            let _ = DestroyMenu(hmenu);
+unsafe fn hide_modal(state_ptr: *mut AppState) {
+    if state_ptr.is_null() {
+        return;
+    }
+    let hwnd = (*state_ptr).hwnd;
+    if !IsWindowVisible(hwnd).as_bool() {
+        return;
+    }
+
+    {
+        let state = &mut *state_ptr;
+        let _ = KillTimer(hwnd, TIMER_BLINK_ID);
+        let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
+        state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
+        state.rerank_requested = false;
+        *state.pending_rerank_results.lock().unwrap() = None;
+        state.pending_surrogate = None;
+        state.ui.set_clips(Vec::new(), Some(0));
+        state.ui.mode = UiMode::SingleCard;
+        state.ui.search_query.clear();
+        state.ui.is_reranking = false;
+        state.ui.has_reranked = false;
+        state.ui.reranked_top_id = None;
+        state.ui.hover_target = HitTarget::None;
+
+        // Evict cached Direct2D textures from VRAM/RAM
+        state.d2d.clear_bitmap_cache();
+
+        // Memory trim on modal close
+        state.db.shrink_memory();
+    }
+
+    let _ = ShowWindow(hwnd, SW_HIDE);
+    let _ = EmptyWorkingSet(GetCurrentProcess());
+}
+
+unsafe fn show_settings(state_ptr: *mut AppState) {
+    show_modal(state_ptr);
+    if !state_ptr.is_null() {
+        let state = &mut *state_ptr;
+        state.ui.mode = UiMode::Settings;
+        let _ = InvalidateRect(state.hwnd, None, false);
+    }
+}
+
+unsafe fn show_tray_menu(state_ptr: *mut AppState) {
+    if state_ptr.is_null() {
+        return;
+    }
+    let hwnd = (*state_ptr).hwnd;
+    let Ok(hmenu) = CreatePopupMenu() else {
+        return;
+    };
+
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_TRAY_OPEN, w!("Open Clipped"));
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_TRAY_SETTINGS, w!("Settings"));
+    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+    let _ = AppendMenuW(hmenu, MF_STRING, ID_TRAY_EXIT, w!("Exit"));
+
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+
+    let _ = SetForegroundWindow(hwnd);
+    let _ = TrackPopupMenuEx(
+        hmenu,
+        (TPM_RIGHTBUTTON | TPM_BOTTOMALIGN).0,
+        pt.x,
+        pt.y,
+        hwnd,
+        None,
+    );
+    let _ = DestroyMenu(hmenu);
+}
+
+unsafe fn paste_selected(state_ptr: *mut AppState) {
+    if state_ptr.is_null() {
+        return;
+    }
+    let paste_data = {
+        let state = &mut *state_ptr;
+        if state.ui.mode == UiMode::Settings {
+            return;
         }
+        let Some(clip) = state.ui.selected_clip() else {
+            return;
+        };
+        let prev_hwnd = state.previous_foreground.load(Ordering::Relaxed);
+        let data_dir = state.ui.data_dir.clone();
+
+        let Ok(Some(clip_to_paste)) = state.db.get_full_clip(&clip.id) else {
+            return;
+        };
+        if state.is_monitoring.compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return;
+        }
+        Some((clip_to_paste, data_dir, prev_hwnd, state.is_monitoring.clone()))
+    };
+
+    let Some((clip_to_paste, data_dir, prev_hwnd, is_monitoring)) = paste_data else {
+        return;
+    };
+
+    hide_modal(state_ptr);
+
+    let mon = is_monitoring.clone();
+    if let Err(err) = std::thread::Builder::new().name("clipped-paste".into()).spawn(move || {
+        if let Err(err) = perform_paste(&clip_to_paste, &data_dir, prev_hwnd, &mon) {
+            eprintln!("Paste failed: {err}");
+        }
+    }) {
+        is_monitoring.store(true, Ordering::Release);
+        eprintln!("Could not start paste: {err}");
     }
 }
 
@@ -549,12 +633,12 @@ pub fn run_app() -> windows::core::Result<()> {
     unsafe {
         // Enforce single running instance
         let mutex_name = w!("Local\\Clipped_SingleInstance_Mutex");
-        let _single_instance_mutex = CreateMutexW(None, true, mutex_name);
+        let _single_instance_mutex = windows::core::Owned::new(CreateMutexW(None, false, mutex_name)?);
         if GetLastError() == ERROR_ALREADY_EXISTS {
             let class_name = w!("ClippedWindowClass");
             if let Ok(existing_hwnd) = FindWindowW(class_name, None) {
                 if !existing_hwnd.0.is_null() {
-                    let _ = ShowWindow(existing_hwnd, SW_SHOW);
+                    let _ = PostMessageW(existing_hwnd, WM_ACTIVATE_INSTANCE, WPARAM(0), LPARAM(0));
                     let _ = SetForegroundWindow(existing_hwnd);
                 }
             }
@@ -562,7 +646,7 @@ pub fn run_app() -> windows::core::Result<()> {
         }
 
         // Initialize COM apartment
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _com = crate::ocr::ComApartment::new(COINIT_APARTMENTTHREADED)?;
 
         // Set Per-Monitor V2 DPI awareness
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -571,9 +655,10 @@ pub fn run_app() -> windows::core::Result<()> {
         let _ = SetCurrentProcessExplicitAppUserModelID(w!("Alexis.Clipped.App"));
 
         let data_dir = get_data_dir();
-        let _ = fs::create_dir_all(&data_dir);
+        fs::create_dir_all(&data_dir).map_err(|e| windows::core::Error::new(E_FAIL, e.to_string()))?;
         let settings = load_settings(&data_dir);
-        let db = Database::init(&data_dir).expect("Failed to initialize SQLite database");
+        let db = Database::init(&data_dir).map_err(|e| windows::core::Error::new(E_FAIL, e.to_string()))?;
+        db.reconcile_orphaned_images();
         let app_state = AppState::new(data_dir.clone(), db, settings)?;
 
         // Register window class
@@ -594,14 +679,18 @@ pub fn run_app() -> windows::core::Result<()> {
             lpszClassName: class_name,
             ..Default::default()
         };
-        RegisterClassExW(&wnd_class);
+        if RegisterClassExW(&wnd_class) == 0 {
+            return Err(windows::core::Error::from_win32());
+        }
 
         let mut app_state = app_state;
         app_state.app_icon_big = app_icon_big;
         app_state.app_icon_sm = app_icon_sm;
 
-        let state_box = Box::new(app_state);
-        let state_ptr = Box::into_raw(state_box);
+        // Keep ownership outside the HWND so creation failures and destruction
+        // cannot lose the allocation. The address remains stable for callbacks.
+        let mut state_box = Box::new(app_state);
+        let state_ptr: *mut AppState = &mut *state_box;
 
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -620,6 +709,7 @@ pub fn run_app() -> windows::core::Result<()> {
 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
         (*state_ptr).hwnd = hwnd;
+        (*state_ptr).ocr_jobs = crate::ocr::start_worker((*state_ptr).db.clone(), hwnd).ok();
 
         let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(app_icon_big.0 as isize));
         let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_SMALL as usize), LPARAM(app_icon_sm.0 as isize));
@@ -672,9 +762,6 @@ pub fn run_app() -> windows::core::Result<()> {
         // Clipboard Format Listener
         let _ = AddClipboardFormatListener(hwnd);
 
-        // Blinking cursor timer
-        let _ = SetTimer(hwnd, TIMER_BLINK_ID, 400, None);
-
         // Initial memory purge
         let _ = EmptyWorkingSet(GetCurrentProcess());
 
@@ -687,25 +774,34 @@ pub fn run_app() -> windows::core::Result<()> {
         }
 
         if !is_autostart {
-            (*state_ptr).show_modal();
+            show_modal(state_ptr);
         }
 
         // Message Loop
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        let loop_result = loop {
+            match GetMessageW(&mut msg, None, 0, 0).0 {
+                -1 => break Err(windows::core::Error::from_win32()),
+                0 => break Ok(()),
+                _ => {}
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
-        }
+        };
 
         // Cleanup
         let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
         let _ = RemoveClipboardFormatListener(hwnd);
         let _ = UnregisterHotKey(hwnd, HOTKEY_ID);
 
-        let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
-        if !ptr.is_null() {
-            let _ = Box::from_raw(ptr);
+        if IsWindow(hwnd).as_bool() {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            let _ = DestroyWindow(hwnd);
         }
+        (*state_ptr).search_sequence_id.fetch_add(1, Ordering::SeqCst);
+        (*state_ptr).ocr_jobs.take();
+        drop(state_box);
+        loop_result?;
     }
 
     Ok(())
@@ -721,13 +817,15 @@ unsafe extern "system" fn wnd_proc(
     if state_ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
-    let state = &mut *state_ptr;
 
     match msg {
         WM_GETICON => {
-            let icon = match wparam.0 as u32 {
-                ICON_BIG => state.app_icon_big,
-                _ => state.app_icon_sm,
+            let icon = {
+                let state = &*state_ptr;
+                match wparam.0 as u32 {
+                    ICON_BIG => state.app_icon_big,
+                    _ => state.app_icon_sm,
+                }
             };
             LRESULT(icon.0 as isize)
         }
@@ -736,20 +834,25 @@ unsafe extern "system" fn wnd_proc(
             let mut ps = PAINTSTRUCT::default();
             let _ = BeginPaint(hwnd, &mut ps);
 
-            let width = (WINDOW_WIDTH * state.dpi_scale).round() as u32;
-            let height = (WINDOW_HEIGHT * state.dpi_scale).round() as u32;
+            {
+                let state = &mut *state_ptr;
+                let width = (WINDOW_WIDTH * state.dpi_scale).round() as u32;
+                let height = (WINDOW_HEIGHT * state.dpi_scale).round() as u32;
 
-            if state.d2d.ensure_target(hwnd, width, height).is_ok() {
-                state.d2d.set_dpi_scale(state.dpi_scale);
-                state.d2d.begin_draw();
-                state.d2d.clear(&D2D1_COLOR_F {
-                    r: 24.0 / 255.0,
-                    g: 24.0 / 255.0,
-                    b: 37.0 / 255.0,
-                    a: 1.0,
-                });
-                state.ui.render(&mut state.d2d);
-                let _ = state.d2d.end_draw();
+                if state.d2d.ensure_target(hwnd, width, height).is_ok() {
+                    state.d2d.set_dpi_scale(state.dpi_scale);
+                    state.d2d.begin_draw();
+                    state.d2d.clear(&D2D1_COLOR_F {
+                        r: 24.0 / 255.0,
+                        g: 24.0 / 255.0,
+                        b: 37.0 / 255.0,
+                        a: 1.0,
+                    });
+                    state.ui.render(&mut state.d2d);
+                    if state.d2d.end_draw().is_err() {
+                        state.d2d.discard_target();
+                    }
+                }
             }
 
             let _ = EndPaint(hwnd, &ps);
@@ -759,7 +862,7 @@ unsafe extern "system" fn wnd_proc(
         WM_HOTKEY => {
             if (wparam.0 as i32) == HOTKEY_ID {
                 if IsWindowVisible(hwnd).as_bool() {
-                    // Cycle to next clip
+                    let state = &mut *state_ptr;
                     let len = state.ui.clips.len();
                     if len > 0 {
                         state.ui.selected_index = (state.ui.selected_index + 1) % len;
@@ -767,14 +870,26 @@ unsafe extern "system" fn wnd_proc(
                         let _ = InvalidateRect(hwnd, None, false);
                     }
                 } else {
-                    state.show_modal();
+                    show_modal(state_ptr);
                 }
             }
             LRESULT(0)
         }
 
         WM_CLIPBOARDUPDATE => {
+            let state = &mut *state_ptr;
             state.on_clipboard_update();
+            LRESULT(0)
+        }
+
+        WM_OCR_COMPLETE => {
+            let state = &mut *state_ptr;
+            state.refresh_ui_clips();
+            LRESULT(0)
+        }
+
+        WM_ACTIVATE_INSTANCE => {
+            show_modal(state_ptr);
             LRESULT(0)
         }
 
@@ -782,21 +897,21 @@ unsafe extern "system" fn wnd_proc(
             let event = (lparam.0 & 0xFFFF) as u32;
             if event == WM_LBUTTONUP {
                 if IsWindowVisible(hwnd).as_bool() {
-                    state.hide_modal();
+                    hide_modal(state_ptr);
                 } else {
-                    state.show_modal();
+                    show_modal(state_ptr);
                 }
             } else if event == WM_RBUTTONUP {
-                state.show_tray_menu();
+                show_tray_menu(state_ptr);
             }
             LRESULT(0)
         }
 
         WM_COMMAND => {
-            let cmd_id = (wparam.0 & 0xFFFF) as usize;
+            let cmd_id = wparam.0 & 0xFFFF;
             match cmd_id {
-                ID_TRAY_OPEN => state.show_modal(),
-                ID_TRAY_SETTINGS => state.show_settings(),
+                ID_TRAY_OPEN => show_modal(state_ptr),
+                ID_TRAY_SETTINGS => show_settings(state_ptr),
                 ID_TRAY_EXIT => {
                     let _ = DestroyWindow(hwnd);
                 }
@@ -807,42 +922,66 @@ unsafe extern "system" fn wnd_proc(
 
         WM_ACTIVATE => {
             let active = (wparam.0 & 0xFFFF) as u32;
-            if active == WA_INACTIVE {
-                if Instant::now() > state.ignore_blur_until {
-                    state.hide_modal();
-                }
+            let should_hide = {
+                let state = &*state_ptr;
+                active == WA_INACTIVE && Instant::now() > state.ignore_blur_until
+            };
+            if should_hide {
+                hide_modal(state_ptr);
             }
             LRESULT(0)
         }
 
         WM_KILLFOCUS => {
-            if Instant::now() > state.ignore_blur_until {
-                state.hide_modal();
+            let should_hide = {
+                let state = &*state_ptr;
+                Instant::now() > state.ignore_blur_until
+            };
+            if should_hide {
+                hide_modal(state_ptr);
             }
             LRESULT(0)
         }
 
         WM_DPICHANGED => {
             let new_dpi = (wparam.0 & 0xFFFF) as u32;
-            state.dpi_scale = (new_dpi as f32) / 96.0;
-            state.center_window();
+            let (x, y, width, height) = {
+                let state = &mut *state_ptr;
+                state.dpi_scale = (new_dpi as f32) / 96.0;
+                state.calculate_window_rect()
+            };
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
 
         WM_TIMER => {
             if wparam.0 == TIMER_BLINK_ID {
-                if state.ui.mode == UiMode::SearchList && IsWindowVisible(hwnd).as_bool() {
+                let is_search = {
+                    let state = &*state_ptr;
+                    state.ui.mode == UiMode::SearchList
+                };
+                if is_search && IsWindowVisible(hwnd).as_bool() {
                     let _ = InvalidateRect(hwnd, None, false);
                 }
             } else if wparam.0 == TIMER_RERANK_DEBOUNCE_ID {
                 let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
+                let state = &mut *state_ptr;
                 state.trigger_semantic_rerank();
             }
             LRESULT(0)
         }
 
         WM_MOUSEMOVE => {
+            let state = &mut *state_ptr;
             let px = (lparam.0 & 0xFFFF) as i16 as f32;
             let py = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
             let lx = px / state.dpi_scale;
@@ -865,6 +1004,7 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_MOUSELEAVE => {
+            let state = &mut *state_ptr;
             if state.ui.hover_target != HitTarget::None {
                 state.ui.hover_target = HitTarget::None;
                 let _ = InvalidateRect(hwnd, None, false);
@@ -875,16 +1015,22 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDOWN => {
             let px = (lparam.0 & 0xFFFF) as i16 as f32;
             let py = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
-            let lx = px / state.dpi_scale;
-            let ly = py / state.dpi_scale;
+            let hit = {
+                let state = &*state_ptr;
+                let lx = px / state.dpi_scale;
+                let ly = py / state.dpi_scale;
+                state.ui.hit_test(lx, ly)
+            };
 
-            let hit = state.ui.hit_test(lx, ly);
             match hit {
                 HitTarget::FavFilter => {
+                    let state = &mut *state_ptr;
                     state.ui.show_favorites = !state.ui.show_favorites;
                     state.refresh_ui_clips_with_selection(Some(0));
+                    state.schedule_rerank_debounce();
                 }
                 HitTarget::SearchBox => {
+                    let state = &mut *state_ptr;
                     if state.ui.mode == UiMode::SingleCard {
                         state.ui.mode = UiMode::SearchList;
                         state.ui.selected_index = 0;
@@ -893,30 +1039,42 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 HitTarget::CloseSettings => {
+                    let state = &mut *state_ptr;
                     state.ui.mode = UiMode::SingleCard;
                     let _ = InvalidateRect(hwnd, None, false);
                 }
                 HitTarget::DockTrash => {
+                    let state = &mut *state_ptr;
                     state.delete_selected();
                 }
                 HitTarget::DockStar => {
+                    let state = &mut *state_ptr;
                     state.toggle_favorite_selected();
                 }
                 HitTarget::ListItem(idx) => {
-                    if state.ui.selected_index == idx {
-                        state.paste_selected();
-                    } else {
-                        state.ui.selected_index = idx;
-                        let _ = InvalidateRect(hwnd, None, false);
+                    let should_paste = {
+                        let state = &mut *state_ptr;
+                        if state.ui.selected_index == idx {
+                            true
+                        } else {
+                            state.ui.selected_index = idx;
+                            let _ = InvalidateRect(hwnd, None, false);
+                            false
+                        }
+                    };
+                    if should_paste {
+                        paste_selected(state_ptr);
                     }
                 }
                 HitTarget::SettingsBootToggle => {
+                    let state = &mut *state_ptr;
                     state.ui.settings.launch_on_boot = !state.ui.settings.launch_on_boot;
                     set_launch_on_boot(state.ui.settings.launch_on_boot);
                     save_settings(&state.ui.data_dir, &state.ui.settings);
                     let _ = InvalidateRect(hwnd, None, false);
                 }
                 HitTarget::ClearNonFavorites => {
+                    let state = &mut *state_ptr;
                     if let Ok(deleted) = state.db.prune_history(0) {
                         for p in deleted {
                             let path = Path::new(&p);
@@ -929,9 +1087,13 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     state.ui.settings_message = "Non-favorites cleared!".to_string();
+                    state.last_text_hash = 0;
+                    state.last_image_hash = 0;
+                    state.d2d.clear_bitmap_cache();
                     state.refresh_ui_clips_with_selection(Some(0));
                 }
                 HitTarget::ClearAll => {
+                    let state = &mut *state_ptr;
                     if let Ok(deleted) = state.db.clear_all_history() {
                         for p in deleted {
                             let path = Path::new(&p);
@@ -944,6 +1106,9 @@ unsafe extern "system" fn wnd_proc(
                         }
                     }
                     state.ui.settings_message = "History cleared!".to_string();
+                    state.last_text_hash = 0;
+                    state.last_image_hash = 0;
+                    state.d2d.clear_bitmap_cache();
                     state.refresh_ui_clips_with_selection(Some(0));
                 }
                 HitTarget::None => {}
@@ -952,10 +1117,11 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_MOUSEWHEEL => {
+            let state = &mut *state_ptr;
             if state.ui.mode == UiMode::SearchList {
                 let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
                 let step = 56.0 * 2.0;
-                let max_scroll = ((state.ui.clips.len() as f32) * 56.0 - 250.0).max(0.0);
+                let max_scroll = ((state.ui.clips.len() as f32) * 56.0 - 260.0).max(0.0);
                 state.ui.scroll_offset = (state.ui.scroll_offset - (delta as f32 / 120.0) * step)
                     .clamp(0.0, max_scroll);
                 let _ = InvalidateRect(hwnd, None, false);
@@ -967,36 +1133,52 @@ unsafe extern "system" fn wnd_proc(
             let key = VIRTUAL_KEY(wparam.0 as u16);
             match key {
                 VK_TAB => {
+                    let state = &mut *state_ptr;
                     if state.ui.mode != UiMode::Settings {
                         state.ui.show_favorites = !state.ui.show_favorites;
                         state.refresh_ui_clips_with_selection(Some(0));
+                        state.schedule_rerank_debounce();
                         let _ = InvalidateRect(hwnd, None, false);
                     }
                 }
                 VK_ESCAPE => {
-                    if state.ui.mode == UiMode::Settings {
-                        state.ui.mode = UiMode::SingleCard;
-                        let _ = InvalidateRect(hwnd, None, false);
-                    } else if state.ui.mode == UiMode::SearchList {
-                        let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
-                        state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
-                        state.ui.search_query.clear();
-                        state.ui.is_reranking = false;
-                        state.ui.has_reranked = false;
-                        state.ui.reranked_top_id = None;
-                        state.ui.mode = UiMode::SingleCard;
-                        state.refresh_ui_clips_with_selection(Some(0));
-                    } else {
-                        state.hide_modal();
+                    let should_hide = {
+                        let state = &mut *state_ptr;
+                        if state.ui.mode == UiMode::Settings {
+                            state.ui.mode = UiMode::SingleCard;
+                            let _ = InvalidateRect(hwnd, None, false);
+                            false
+                        } else if state.ui.mode == UiMode::SearchList {
+                            let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
+                            state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
+                            let had_query = !state.ui.search_query.is_empty();
+                            state.ui.search_query.clear();
+                            state.pending_surrogate = None;
+                            state.ui.is_reranking = false;
+                            state.ui.has_reranked = false;
+                            state.ui.reranked_top_id = None;
+                            if !had_query {
+                                state.ui.mode = UiMode::SingleCard;
+                            }
+                            state.refresh_ui_clips_with_selection(Some(0));
+                            false
+                        } else {
+                            true
+                        }
+                    };
+                    if should_hide {
+                        hide_modal(state_ptr);
                     }
                 }
                 VK_RETURN => {
-                    state.paste_selected();
+                    paste_selected(state_ptr);
                 }
                 VK_DELETE => {
+                    let state = &mut *state_ptr;
                     state.delete_selected();
                 }
                 VK_UP | VK_LEFT => {
+                    let state = &mut *state_ptr;
                     let len = state.ui.clips.len();
                     if len > 0 {
                         if state.ui.selected_index > 0 {
@@ -1009,6 +1191,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 VK_DOWN | VK_RIGHT => {
+                    let state = &mut *state_ptr;
                     let len = state.ui.clips.len();
                     if len > 0 {
                         if state.ui.selected_index < len - 1 {
@@ -1021,20 +1204,14 @@ unsafe extern "system" fn wnd_proc(
                     }
                 }
                 VK_BACK => {
+                    let state = &mut *state_ptr;
                     if state.ui.mode == UiMode::SearchList {
-                        if state.ui.search_query.pop().is_some() {
-                            if state.ui.search_query.is_empty() {
-                                let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
-                                state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
-                                state.ui.is_reranking = false;
-                                state.ui.has_reranked = false;
-                                state.ui.reranked_top_id = None;
-                                state.ui.mode = UiMode::SingleCard;
-                                state.refresh_ui_clips_with_selection(Some(0));
-                            } else {
-                                state.refresh_ui_clips_with_selection(Some(0));
-                            }
+                        state.pending_surrogate = None;
+                        if state.ui.search_query.pop().is_none() {
+                            state.ui.mode = UiMode::SingleCard;
                         }
+                        state.refresh_ui_clips_with_selection(Some(0));
+                        state.schedule_rerank_debounce();
                     }
                 }
                 _ => {}
@@ -1043,10 +1220,13 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_CHAR => {
-            let ch = char::from_u32(wparam.0 as u32).unwrap_or('\0');
+            let state = &mut *state_ptr;
+            let Some(ch) = decode_input_unit(&mut state.pending_surrogate, wparam.0 as u16) else {
+                return LRESULT(0);
+            };
             if !ch.is_control() && state.ui.mode != UiMode::Settings {
                 // In SingleCard mode, check for number navigation 1-9
-                if state.ui.mode == UiMode::SingleCard && ch >= '1' && ch <= '9' {
+                if state.ui.mode == UiMode::SingleCard && ('1'..='9').contains(&ch) {
                     let idx = (ch as usize) - ('1' as usize);
                     if idx < state.ui.clips.len() {
                         state.ui.selected_index = idx;
@@ -1061,23 +1241,37 @@ unsafe extern "system" fn wnd_proc(
                     state.ui.search_query.clear();
                 }
                 state.ui.search_query.push(ch);
+                let _ = SetTimer(hwnd, TIMER_BLINK_ID, 500, None);
                 state.refresh_ui_clips_with_selection(Some(0));
+                state.schedule_rerank_debounce();
             }
             LRESULT(0)
         }
 
         WM_RERANK_COMPLETE => {
+            let state = &mut *state_ptr;
+            state.rerank_in_flight = false;
             apply_rerank_completion(
                 &mut state.ui,
                 wparam.0 as u64,
                 state.search_sequence_id.load(Ordering::SeqCst),
                 &state.pending_rerank_results,
             );
+            if state.rerank_requested {
+                state.trigger_semantic_rerank();
+            }
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
 
         WM_DESTROY => {
+            let _ = KillTimer(hwnd, TIMER_BLINK_ID);
+            let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
+            {
+                let state = &mut *state_ptr;
+                state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
+                *state.pending_rerank_results.lock().unwrap() = None;
+            }
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -1119,6 +1313,20 @@ fn parse_hotkey(shortcut: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
     };
 
     Some((mods, vk))
+}
+
+fn decode_input_unit(pending: &mut Option<u16>, unit: u16) -> Option<char> {
+    if (0xD800..=0xDBFF).contains(&unit) {
+        *pending = Some(unit);
+        return None;
+    }
+    let high = pending.take();
+    if (0xDC00..=0xDFFF).contains(&unit) {
+        let high = high?;
+        char::from_u32(0x10000 + ((high as u32 - 0xD800) << 10) + unit as u32 - 0xDC00)
+    } else {
+        char::from_u32(unit as u32)
+    }
 }
 
 fn set_launch_on_boot(enable: bool) {
@@ -1182,9 +1390,11 @@ fn save_image_fast_png(
     let mut writer = BufWriter::new(file);
     let encoder = PngEncoder::new_with_quality(&mut writer, CompressionType::Fast, FilterType::NoFilter);
     encoder.write_image(bytes, width, height, image::ExtendedColorType::Rgba8)?;
+    writer.flush()?;
     Ok(())
 }
 
+#[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCEW(1), not a dereferenceable pointer.
 unsafe fn load_app_icon(h_instance: HINSTANCE, sm: bool) -> HICON {
     let (cx, cy) = if sm {
         (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON))
@@ -1251,6 +1461,15 @@ unsafe fn load_app_icon(h_instance: HINSTANCE, sm: bool) -> HICON {
 #[cfg(test)]
 mod icon_tests {
     use super::*;
+
+    #[test]
+    fn input_decodes_surrogate_pairs() {
+        let mut pending = None;
+        assert_eq!(decode_input_unit(&mut pending, 0xD83D), None);
+        assert_eq!(decode_input_unit(&mut pending, 0xDE00), Some('\u{1f600}'));
+        assert_eq!(decode_input_unit(&mut pending, 0xDE00), None);
+        assert_eq!(decode_input_unit(&mut pending, b'a' as u16), Some('a'));
+    }
 
     #[test]
     fn test_rerank_completion_replaces_list_and_ignores_stale_messages() {

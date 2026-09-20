@@ -9,7 +9,6 @@ use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM};
 
-#[allow(dead_code)]
 pub struct Brushes {
     pub bg: ID2D1SolidColorBrush,
     pub card: ID2D1SolidColorBrush,
@@ -29,9 +28,7 @@ pub struct Brushes {
     pub dock_border: ID2D1SolidColorBrush,
     pub trash: ID2D1SolidColorBrush,
     pub trash_bg: ID2D1SolidColorBrush,
-    pub highlight: ID2D1SolidColorBrush,
     pub search_bg: ID2D1SolidColorBrush,
-    pub search_border: ID2D1SolidColorBrush,
     pub pill_bg: ID2D1SolidColorBrush,
     pub scroll_thumb: ID2D1SolidColorBrush,
     pub syn_keyword: ID2D1SolidColorBrush,
@@ -51,7 +48,7 @@ impl Brushes {
                 card: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 30.0 / 255.0, g: 30.0 / 255.0, b: 46.0 / 255.0, a: 1.0 }, None)?,
                 card_hover: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 38.0 / 255.0, g: 38.0 / 255.0, b: 58.0 / 255.0, a: 1.0 }, None)?,
                 card_selected: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 49.0 / 255.0, g: 50.0 / 255.0, b: 68.0 / 255.0, a: 1.0 }, None)?,
-                accent: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 255.0 / 255.0, a: 1.0 }, None)?,
+                accent: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 1.0, a: 1.0 }, None)?,
                 favorite: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 1.0 }, None)?,
                 favorite_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 0.15 }, None)?,
                 favorite_selected_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 251.0 / 255.0, g: 191.0 / 255.0, b: 36.0 / 255.0, a: 0.22 }, None)?,
@@ -65,9 +62,7 @@ impl Brushes {
                 dock_border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.15 }, None)?,
                 trash: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 1.0 }, None)?,
                 trash_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 248.0 / 255.0, g: 113.0 / 255.0, b: 113.0 / 255.0, a: 0.15 }, None)?,
-                highlight: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 100.0 / 255.0, g: 108.0 / 255.0, b: 255.0 / 255.0, a: 0.35 }, None)?,
                 search_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.30 }, None)?,
-                search_border: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.15 }, None)?,
                 pill_bg: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.30 }, None)?,
                 scroll_thumb: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.20 }, None)?,
                 syn_keyword: target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 203.0 / 255.0, g: 166.0 / 255.0, b: 247.0 / 255.0, a: 1.0 }, None)?,
@@ -82,7 +77,6 @@ impl Brushes {
     }
 }
 
-#[allow(dead_code)]
 pub struct TextFormats {
     pub counter: IDWriteTextFormat,
     pub search: IDWriteTextFormat,
@@ -95,7 +89,6 @@ pub struct TextFormats {
     pub small: IDWriteTextFormat,
 }
 
-#[allow(dead_code)]
 pub struct D2dContext {
     pub factory: ID2D1Factory,
     pub dwrite_factory: IDWriteFactory,
@@ -103,7 +96,7 @@ pub struct D2dContext {
     pub render_target: Option<ID2D1RenderTarget>,
     pub brushes: Option<Brushes>,
     pub formats: Option<TextFormats>,
-    pub bitmap_cache: RefCell<HashMap<String, ID2D1Bitmap>>,
+    pub bitmap_cache: RefCell<HashMap<(String, u32), ID2D1Bitmap>>,
     pub current_size: (u32, u32),
 }
 
@@ -252,7 +245,10 @@ impl D2dContext {
         if let Some(ref target) = self.hwnd_target {
             if self.current_size != (width, height) {
                 unsafe {
-                    target.Resize(&D2D_SIZE_U { width, height })?;
+                    if let Err(err) = target.Resize(&D2D_SIZE_U { width, height }) {
+                        self.discard_target();
+                        return Err(err);
+                    }
                 }
                 self.current_size = (width, height);
             }
@@ -309,6 +305,14 @@ impl D2dContext {
         }
     }
 
+    pub fn discard_target(&mut self) {
+        self.clear_bitmap_cache();
+        self.brushes = None;
+        self.render_target = None;
+        self.hwnd_target = None;
+        self.current_size = (0, 0);
+    }
+
     pub fn begin_draw(&self) {
         if let Some(ref target) = self.render_target {
             unsafe {
@@ -356,8 +360,9 @@ impl D2dContext {
         }
     }
 
-    pub fn get_or_load_bitmap(&self, path_str: &str) -> Option<ID2D1Bitmap> {
-        if let Some(bmp) = self.bitmap_cache.borrow().get(path_str) {
+    pub fn get_or_load_bitmap(&self, path_str: &str, max_edge: u32) -> Option<ID2D1Bitmap> {
+        let key = (path_str.to_owned(), max_edge);
+        if let Some(bmp) = self.bitmap_cache.borrow().get(&key) {
             return Some(bmp.clone());
         }
 
@@ -368,7 +373,9 @@ impl D2dContext {
         }
 
         let dynamic_img = image::open(path).ok()?;
-        let rgba = dynamic_img.to_rgba8();
+        // Retain display-sized previews, not full screenshots on the GPU.
+        let mut rgba = dynamic_img.thumbnail(max_edge, max_edge).into_rgba8();
+        premultiply_alpha(rgba.as_mut());
         let (width, height) = rgba.dimensions();
 
         unsafe {
@@ -390,7 +397,15 @@ impl D2dContext {
                     &props,
                 )
                 .ok()?;
-            self.bitmap_cache.borrow_mut().insert(path_str.to_string(), bmp.clone());
+            let mut cache = self.bitmap_cache.borrow_mut();
+            let retained_bytes: u64 = cache.values().map(|bitmap| {
+                let size = bitmap.GetPixelSize();
+                u64::from(size.width) * u64::from(size.height) * 4
+            }).sum();
+            if cache.len() >= 8 || retained_bytes + u64::from(width) * u64::from(height) * 4 > 8 * 1024 * 1024 {
+                cache.clear();
+            }
+            cache.insert(key, bmp.clone());
             Some(bmp)
         }
     }
@@ -399,6 +414,7 @@ impl D2dContext {
         self.bitmap_cache.borrow_mut().clear();
     }
 
+    #[allow(clippy::too_many_arguments)] // Direct drawing primitive; keep coordinates explicit.
     pub fn draw_rounded_rect(
         &self,
         x: f32,
@@ -550,44 +566,6 @@ impl D2dContext {
                     1.2,
                     None,
                 );
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn draw_gear_icon(&self, cx: f32, cy: f32, radius: f32, stroke: &ID2D1SolidColorBrush) {
-        if let Some(ref target) = self.render_target {
-            unsafe {
-                // Inner center hole
-                let inner_ellipse = D2D1_ELLIPSE {
-                    point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: radius * 0.35,
-                    radiusY: radius * 0.35,
-                };
-                target.DrawEllipse(&inner_ellipse, stroke, 1.3, None);
-
-                // Outer connecting ring
-                let outer_ellipse = D2D1_ELLIPSE {
-                    point: D2D_POINT_2F { x: cx, y: cy },
-                    radiusX: radius * 0.65,
-                    radiusY: radius * 0.65,
-                };
-                target.DrawEllipse(&outer_ellipse, stroke, 1.2, None);
-
-                // 8 radial teeth
-                let teeth = 8;
-                for i in 0..teeth {
-                    let angle = (i as f32) * std::f32::consts::PI * 2.0 / (teeth as f32);
-                    let p1 = D2D_POINT_2F {
-                        x: cx + angle.cos() * (radius * 0.58),
-                        y: cy + angle.sin() * (radius * 0.58),
-                    };
-                    let p2 = D2D_POINT_2F {
-                        x: cx + angle.cos() * radius,
-                        y: cy + angle.sin() * radius,
-                    };
-                    target.DrawLine(p1, p2, stroke, 1.8, None);
-                }
             }
         }
     }
@@ -899,8 +877,33 @@ impl D2dContext {
         output_path: &Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use windows::Win32::Graphics::Gdi::*;
+        struct Surface {
+            dc: HDC,
+            bitmap: HBITMAP,
+            old: HGDIOBJ,
+        }
+        impl Drop for Surface {
+            fn drop(&mut self) {
+                unsafe {
+                    if !self.old.is_invalid() {
+                        SelectObject(self.dc, self.old);
+                    }
+                    if !self.bitmap.is_invalid() {
+                        let _ = DeleteObject(self.bitmap);
+                    }
+                    let _ = DeleteDC(self.dc);
+                }
+            }
+        }
+        let byte_len = (width as usize).checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4)).filter(|&n| n > 0 && n <= 128 * 1024 * 1024)
+            .ok_or("Invalid export dimensions")?;
         unsafe {
             let hdc = CreateCompatibleDC(None);
+            if hdc.is_invalid() {
+                return Err(windows::core::Error::from_win32().into());
+            }
+            let mut surface = Surface { dc: hdc, bitmap: HBITMAP::default(), old: HGDIOBJ::default() };
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -923,8 +926,11 @@ impl D2dContext {
                 None,
                 0,
             )?;
-
-            let old_bmp = SelectObject(hdc, hbitmap);
+            surface.bitmap = hbitmap;
+            surface.old = SelectObject(hdc, hbitmap);
+            if bits.is_null() || surface.old.is_invalid() {
+                return Err("Could not select export bitmap".into());
+            }
 
             let props = D2D1_RENDER_TARGET_PROPERTIES {
                 r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
@@ -951,19 +957,18 @@ impl D2dContext {
             };
             dc_target.BindDC(hdc, &sub_rect)?;
 
-            let prev_target = self.render_target.take();
-            let prev_brushes = self.brushes.take();
-
             let brushes = Brushes::new(&target)?;
-
-            self.render_target = Some(target.clone());
-            self.brushes = Some(brushes);
+            // Export resources belong to a separate render target and cache.
+            let mut export = Self::new()?;
+            export.factory = self.factory.clone();
+            export.render_target = Some(target.clone());
+            export.brushes = Some(brushes);
 
             target.BeginDraw();
-            ui.render(self);
+            ui.render(&mut export);
             target.EndDraw(None, None)?;
 
-            let total_pixels = (width * height) as usize;
+            let total_pixels = byte_len / 4;
             let slice = std::slice::from_raw_parts(bits as *const u8, total_pixels * 4);
             let mut rgba_buf = vec![0u8; total_pixels * 4];
             for i in 0..total_pixels {
@@ -985,14 +990,37 @@ impl D2dContext {
                 image::ExtendedColorType::Rgba8,
             )?;
 
-            self.render_target = prev_target;
-            self.brushes = prev_brushes;
-
-            SelectObject(hdc, old_bmp);
-            let _ = DeleteObject(hbitmap);
-            let _ = DeleteDC(hdc);
-
             Ok(())
         }
+    }
+}
+
+fn premultiply_alpha(bytes: &mut [u8]) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        for channel in &mut pixel[..3] {
+            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitmap_alpha_is_premultiplied() {
+        let mut rgba = [255, 128, 0, 128, 255, 255, 255, 0];
+        premultiply_alpha(&mut rgba);
+        assert_eq!(rgba, [128, 64, 0, 128, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn failed_export_does_not_replace_render_resources() {
+        let mut d2d = D2dContext::new().unwrap();
+        let mut ui = crate::ui::UiState::new(std::path::PathBuf::new(), crate::model::AppSettings::default());
+        assert!(d2d.export_ui_to_png(&mut ui, 0, 360, Path::new("unused.png")).is_err());
+        assert!(d2d.render_target.is_none());
+        assert!(d2d.brushes.is_none());
     }
 }
