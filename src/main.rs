@@ -27,6 +27,8 @@ fn main() -> windows::core::Result<()> {
                 image_height: None,
                 ocr_text: None,
                 full_text_len: sample_json.len(),
+                created_at: 0,
+                source_app: None,
             };
             let item2 = db::ClipItem {
                 id: "2".into(),
@@ -38,6 +40,8 @@ fn main() -> windows::core::Result<()> {
                 image_height: None,
                 ocr_text: None,
                 full_text_len: 16,
+                created_at: 0,
+                source_app: None,
             };
             ui.set_clips(vec![item1.clone(), item2.clone()], Some(0));
             if let Err(_e) = d2d.export_ui_to_png(&mut ui, model::WINDOW_WIDTH as u32, model::WINDOW_HEIGHT as u32, std::path::Path::new(path_str)) {
@@ -62,6 +66,8 @@ fn main() -> windows::core::Result<()> {
                 image_height: None,
                 ocr_text: None,
                 full_text_len: sample_json.len(),
+                created_at: 0,
+                source_app: None,
             };
             let sample_code = "fn handle_paste(id: &str) -> Result<bool> {\n    // Auto-paste into active window\n    let item = db.get_clip(id)?;\n    enigo.key_sequence(\"paste\");\n    Ok(true)\n}";
             let item2 = db::ClipItem {
@@ -74,6 +80,8 @@ fn main() -> windows::core::Result<()> {
                 image_height: None,
                 ocr_text: None,
                 full_text_len: sample_code.len(),
+                created_at: 0,
+                source_app: None,
             };
             ui.set_clips(vec![item1, item2], Some(1));
             if let Err(_e) = d2d.export_ui_to_png(&mut ui, model::WINDOW_WIDTH as u32, model::WINDOW_HEIGHT as u32, std::path::Path::new(path_str)) {
@@ -112,6 +120,8 @@ fn main() -> windows::core::Result<()> {
                 image_height: None,
                 ocr_text: None,
                 full_text_len: 48,
+                created_at: 0,
+                source_app: None,
             };
             let sample_json = "{\n  \"name\": \"clipped-app\",\n  \"dependencies\": {\n    \"windows\": \"0.58\"\n  }\n}";
             let item2 = db::ClipItem {
@@ -124,6 +134,8 @@ fn main() -> windows::core::Result<()> {
                 image_height: None,
                 ocr_text: None,
                 full_text_len: sample_json.len(),
+                created_at: 0,
+                source_app: None,
             };
             let item3 = db::ClipItem {
                 id: "3".into(),
@@ -135,6 +147,8 @@ fn main() -> windows::core::Result<()> {
                 image_height: Some(256),
                 ocr_text: Some("Clipped Desktop App".into()),
                 full_text_len: 0,
+                created_at: 0,
+                source_app: None,
             };
             ui.set_clips(vec![item1, item2, item3], Some(1));
             if let Err(_e) = d2d.export_ui_to_png(&mut ui, model::WINDOW_WIDTH as u32, model::WINDOW_HEIGHT as u32, std::path::Path::new(path_str)) {

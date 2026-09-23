@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension, Result};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,135 @@ pub struct ClipItem {
     pub ocr_text: Option<String>,
     #[serde(default)]
     pub full_text_len: usize,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub source_app: Option<String>,
+}
+
+impl Default for ClipItem {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            text: String::new(),
+            is_favorite: false,
+            clip_type: default_clip_type(),
+            image_path: None,
+            image_width: None,
+            image_height: None,
+            ocr_text: None,
+            full_text_len: 0,
+            created_at: 0,
+            source_app: None,
+        }
+    }
+}
+
+impl ClipItem {
+    pub fn relative_time(&self) -> Cow<'static, str> {
+        format_relative_time(self.created_at)
+    }
+
+    pub fn display_source_app(&self) -> Option<Cow<'static, str>> {
+        self.source_app.as_deref().map(format_app_name)
+    }
+}
+
+// ponytail: static friendly process name map; upgrade to PE version info resource lookup if raw product names needed.
+pub fn format_app_name(raw: &str) -> Cow<'static, str> {
+    let lower = raw.to_lowercase();
+    match lower.as_str() {
+        "code" => Cow::Borrowed("VS Code"),
+        "chrome" => Cow::Borrowed("Chrome"),
+        "msedge" => Cow::Borrowed("Edge"),
+        "firefox" => Cow::Borrowed("Firefox"),
+        "windowsterminal" => Cow::Borrowed("Terminal"),
+        "powershell" => Cow::Borrowed("PowerShell"),
+        "cmd" => Cow::Borrowed("Command Prompt"),
+        "notepad" => Cow::Borrowed("Notepad"),
+        "explorer" => Cow::Borrowed("Explorer"),
+        "slack" => Cow::Borrowed("Slack"),
+        "discord" => Cow::Borrowed("Discord"),
+        "spotify" => Cow::Borrowed("Spotify"),
+        "devenv" => Cow::Borrowed("Visual Studio"),
+        "idea64" => Cow::Borrowed("IntelliJ IDEA"),
+        "sublime_text" => Cow::Borrowed("Sublime Text"),
+        "cursor" => Cow::Borrowed("Cursor"),
+        "zen" => Cow::Borrowed("Zen Browser"),
+        "brave" => Cow::Borrowed("Brave"),
+        "alacritty" => Cow::Borrowed("Alacritty"),
+        "wezterm-gui" | "wezterm" => Cow::Borrowed("WezTerm"),
+        _ => {
+            let mut chars = raw.chars();
+            match chars.next() {
+                None => Cow::Borrowed(""),
+                Some(first) => {
+                    let mut s = first.to_uppercase().collect::<String>();
+                    s.push_str(chars.as_str());
+                    Cow::Owned(s)
+                }
+            }
+        }
+    }
+}
+
+// ponytail: bucketed relative time formatting with 30-day month ceiling; upgrade to calendar-aware crate if localization/exact calendar months requested.
+pub fn format_relative_time(created_at_ms: i64) -> Cow<'static, str> {
+    if created_at_ms <= 0 {
+        return Cow::Borrowed("");
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    format_relative_time_from(created_at_ms, now_ms)
+}
+
+pub fn format_relative_time_from(created_at_ms: i64, now_ms: i64) -> Cow<'static, str> {
+    if created_at_ms <= 0 {
+        return Cow::Borrowed("");
+    }
+    let diff_ms = now_ms.saturating_sub(created_at_ms);
+    let diff_secs = diff_ms / 1000;
+
+    if diff_secs < 60 {
+        Cow::Borrowed("moments ago")
+    } else if diff_secs < 3600 {
+        let mins = diff_secs / 60;
+        if mins == 1 {
+            Cow::Borrowed("1 minute ago")
+        } else {
+            Cow::Owned(format!("{mins} minutes ago"))
+        }
+    } else if diff_secs < 86400 {
+        let hours = diff_secs / 3600;
+        if hours == 1 {
+            Cow::Borrowed("1 hour ago")
+        } else {
+            Cow::Owned(format!("{hours} hours ago"))
+        }
+    } else if diff_secs < 86400 * 30 {
+        let days = diff_secs / 86400;
+        if days == 1 {
+            Cow::Borrowed("1 day ago")
+        } else {
+            Cow::Owned(format!("{days} days ago"))
+        }
+    } else if diff_secs < 86400 * 365 {
+        let months = (diff_secs / (86400 * 30)).max(1);
+        if months == 1 {
+            Cow::Borrowed("1 month ago")
+        } else {
+            Cow::Owned(format!("{months} months ago"))
+        }
+    } else {
+        let years = (diff_secs / (86400 * 365)).max(1);
+        if years == 1 {
+            Cow::Borrowed("1 year ago")
+        } else {
+            Cow::Owned(format!("{years} years ago"))
+        }
+    }
 }
 
 fn truncate_preview(s: &str, max_len: usize) -> String {
@@ -73,16 +203,21 @@ impl Database {
                 image_height INTEGER,
                 ocr_text TEXT,
                 created_at INTEGER NOT NULL,
-                content_hash TEXT
+                content_hash TEXT,
+                source_app TEXT
             );
             ",
         )?;
 
-        if !writer_conn.prepare("PRAGMA table_info(clips)")?
+        let existing_cols: Vec<String> = writer_conn.prepare("PRAGMA table_info(clips)")?
             .query_map([], |r| r.get::<_, String>(1))?
-            .collect::<Result<Vec<_>>>()?.iter().any(|name| name == "content_hash")
-        {
+            .collect::<Result<Vec<_>>>()?;
+
+        if !existing_cols.iter().any(|name| name == "content_hash") {
             writer_conn.execute("ALTER TABLE clips ADD COLUMN content_hash TEXT;", [])?;
+        }
+        if !existing_cols.iter().any(|name| name == "source_app") {
+            writer_conn.execute("ALTER TABLE clips ADD COLUMN source_app TEXT;", [])?;
         }
         writer_conn.pragma_update(None, "recursive_triggers", true)?;
 
@@ -228,6 +363,8 @@ impl Database {
                     image_height: None,
                     ocr_text: None,
                     full_text_len: 0,
+                    created_at: 0,
+                    source_app: None,
                 })
                 .collect()
         } else {
@@ -247,8 +384,8 @@ impl Database {
                 for (idx, item) in items.into_iter().enumerate() {
                     let timestamp = base_time - ((count - idx) as i64 * 10);
                     tx.execute(
-                        "INSERT OR IGNORE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
+                        "INSERT OR IGNORE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash, source_app)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)",
                         params![
                             item.id,
                             item.text,
@@ -258,7 +395,8 @@ impl Database {
                             item.image_width,
                             item.image_height,
                             item.ocr_text,
-                            timestamp
+                            timestamp,
+                            item.source_app
                         ],
                     )?;
                 }
@@ -272,7 +410,7 @@ impl Database {
     }
 
     /// Saves a text clip, or bumps an existing clip to the top via indexed 128-bit hash
-    pub fn save_or_bump_text(&self, text: String, hash: &str) -> Result<ClipItem> {
+    pub fn save_or_bump_text(&self, text: String, hash: &str, source_app: Option<&str>) -> Result<ClipItem> {
         let conn = self.writer_conn.lock().unwrap();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -281,7 +419,7 @@ impl Database {
 
         // P5: Direct indexed lookup by content_hash only (no slow OR text = ?)
         let mut stmt = conn.prepare(
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
              FROM clips WHERE clip_type = 'text' AND content_hash = ?1 LIMIT 1"
         )?;
 
@@ -298,14 +436,20 @@ impl Database {
                 image_height: row.get(6)?,
                 ocr_text: row.get(7)?,
                 full_text_len: text_len,
+                created_at: row.get(8)?,
+                source_app: row.get(9)?,
             })
         }).optional()?;
 
-        if let Some(clip) = existing {
+        if let Some(mut clip) = existing {
             conn.execute(
-                "UPDATE clips SET created_at = ?1 WHERE id = ?2",
-                params![timestamp, clip.id],
+                "UPDATE clips SET created_at = ?1, source_app = COALESCE(?2, source_app) WHERE id = ?3",
+                params![timestamp, source_app, clip.id],
             )?;
+            clip.created_at = timestamp;
+            if let Some(app) = source_app {
+                clip.source_app = Some(app.to_string());
+            }
             return Ok(clip);
         }
 
@@ -322,11 +466,13 @@ impl Database {
             image_height: None,
             ocr_text: None,
             full_text_len: text_len,
+            created_at: timestamp,
+            source_app: source_app.map(|s| s.to_string()),
         };
 
         conn.execute(
-            "INSERT INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
-             VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash, source_app)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 new_item.id,
                 new_item.text,
@@ -336,7 +482,8 @@ impl Database {
                 new_item.image_height,
                 new_item.ocr_text,
                 timestamp,
-                hash
+                hash,
+                new_item.source_app
             ],
         )?;
 
@@ -347,7 +494,7 @@ impl Database {
     pub fn find_image_by_hash(&self, hash: &str) -> Result<Option<ClipItem>> {
         let conn = self.reader_conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
              FROM clips WHERE clip_type = 'image' AND content_hash = ?1 LIMIT 1"
         )?;
 
@@ -364,14 +511,16 @@ impl Database {
                 image_height: row.get(6)?,
                 ocr_text: row.get(7)?,
                 full_text_len: text_len,
+                created_at: row.get(8)?,
+                source_app: row.get(9)?,
             })
         }).optional()?;
 
         Ok(existing)
     }
 
-    /// Bumps an existing clip's timestamp to now (moves to top of history)
-    pub fn bump_clip_timestamp(&self, id: &str) -> Result<()> {
+    /// Bumps an existing clip's timestamp to now (moves to top of history) and updates source_app if provided
+    pub fn bump_clip_timestamp(&self, id: &str, source_app: Option<&str>) -> Result<()> {
         let conn = self.writer_conn.lock().unwrap();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -379,8 +528,8 @@ impl Database {
             .as_millis() as i64;
 
         conn.execute(
-            "UPDATE clips SET created_at = ?1 WHERE id = ?2",
-            params![timestamp, id],
+            "UPDATE clips SET created_at = ?1, source_app = COALESCE(?2, source_app) WHERE id = ?3",
+            params![timestamp, source_app, id],
         )?;
         Ok(())
     }
@@ -388,14 +537,18 @@ impl Database {
     /// Inserts a new image clip with content hash
     pub fn insert_image_clip(&self, item: &ClipItem, hash: &str) -> Result<()> {
         let conn = self.writer_conn.lock().unwrap();
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let timestamp = if item.created_at > 0 {
+            item.created_at
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64
+        };
 
         conn.execute(
-            "INSERT OR REPLACE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR REPLACE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash, source_app)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 item.id,
                 item.text,
@@ -406,7 +559,8 @@ impl Database {
                 item.image_height,
                 item.ocr_text,
                 timestamp,
-                hash
+                hash,
+                item.source_app
             ],
         )?;
 
@@ -416,14 +570,18 @@ impl Database {
     #[cfg(test)]
     pub fn insert_clip(&self, item: &ClipItem) -> Result<()> {
         let conn = self.writer_conn.lock().unwrap();
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let timestamp = if item.created_at > 0 {
+            item.created_at
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64
+        };
 
         conn.execute(
-            "INSERT OR REPLACE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
+            "INSERT OR REPLACE INTO clips (id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, content_hash, source_app)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)",
             params![
                 item.id,
                 item.text,
@@ -433,7 +591,8 @@ impl Database {
                 item.image_width,
                 item.image_height,
                 item.ocr_text,
-                timestamp
+                timestamp,
+                item.source_app
             ],
         )?;
 
@@ -451,10 +610,10 @@ impl Database {
     pub fn get_history(&self, limit: usize, favorites_only: bool) -> Result<Vec<ClipItem>> {
         let conn = self.reader_conn.lock().unwrap();
         let sql = if favorites_only {
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
              FROM clips WHERE is_favorite = 1 ORDER BY created_at DESC LIMIT ?1"
         } else {
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
              FROM clips ORDER BY created_at DESC LIMIT ?1"
         };
 
@@ -477,6 +636,8 @@ impl Database {
                 image_height: row.get(6)?,
                 ocr_text: preview_ocr,
                 full_text_len: text_len,
+                created_at: row.get(8)?,
+                source_app: row.get(9)?,
             })
         })?;
 
@@ -495,7 +656,7 @@ impl Database {
     ) -> Result<Vec<ClipItem>> {
         let conn = self.reader_conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
              FROM clips WHERE (?1 = 0 OR is_favorite = 1)
              ORDER BY created_at DESC, rowid DESC"
         )?;
@@ -514,6 +675,8 @@ impl Database {
                 image_width: row.get(5)?,
                 image_height: row.get(6)?,
                 ocr_text: row.get(7)?,
+                created_at: row.get(8)?,
+                source_app: row.get(9)?,
             };
             if let Some(format) = format {
                 if crate::typesafe::clip_format(&item) != format {
@@ -551,7 +714,7 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<ClipItem>> {
         let fts_sql = if favorites_only {
-            "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text
+            "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text, c.created_at, c.source_app
              FROM clips c
              JOIN clips_fts f ON c.rowid = f.rowid
              WHERE clips_fts MATCH ?1 AND c.is_favorite = 1
@@ -564,7 +727,7 @@ impl Database {
                bm25(clips_fts), c.created_at DESC
              LIMIT ?2"
         } else {
-            "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text
+            "SELECT c.id, c.text, c.is_favorite, c.clip_type, c.image_path, c.image_width, c.image_height, c.ocr_text, c.created_at, c.source_app
              FROM clips c
              JOIN clips_fts f ON c.rowid = f.rowid
              WHERE clips_fts MATCH ?1
@@ -596,6 +759,8 @@ impl Database {
                     image_height: row.get(6)?,
                     ocr_text: preview_ocr,
                     full_text_len: text_len,
+                    created_at: row.get(8)?,
+                    source_app: row.get(9)?,
                 })
             })?;
         rows.collect()
@@ -674,7 +839,7 @@ impl Database {
         let escaped = trimmed.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
         let like_pattern = format!("%{}%", escaped);
         let like_sql = if favorites_only {
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
              FROM clips
              WHERE (text LIKE ?1 ESCAPE '\\' OR (ocr_text IS NOT NULL AND ocr_text LIKE ?1 ESCAPE '\\')) AND is_favorite = 1
              ORDER BY
@@ -684,7 +849,7 @@ impl Database {
                END ASC,
                created_at DESC LIMIT ?2"
         } else {
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
              FROM clips
              WHERE (text LIKE ?1 ESCAPE '\\' OR (ocr_text IS NOT NULL AND ocr_text LIKE ?1 ESCAPE '\\'))
              ORDER BY
@@ -713,6 +878,8 @@ impl Database {
                 image_height: row.get(6)?,
                 ocr_text: preview_ocr,
                 full_text_len: text_len,
+                created_at: row.get(8)?,
+                source_app: row.get(9)?,
             })
         })?;
 
@@ -726,7 +893,7 @@ impl Database {
     pub fn get_full_clip(&self, id: &str) -> Result<Option<ClipItem>> {
         let conn = self.reader_conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text
+            "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
              FROM clips WHERE id = ?1 LIMIT 1"
         )?;
 
@@ -744,6 +911,8 @@ impl Database {
                 image_height: row.get(6)?,
                 ocr_text: row.get(7)?,
                 full_text_len: text_len,
+                created_at: row.get(8)?,
+                source_app: row.get(9)?,
             }))
         } else {
             Ok(None)
@@ -855,13 +1024,13 @@ mod tests {
     fn fts_survives_restart_replacement_and_metadata_updates() {
         let dir = temp_db_dir();
         let db = Database::init(&dir).unwrap();
-        let mut item = db.save_or_bump_text("original token".into(), "hash").unwrap();
+        let mut item = db.save_or_bump_text("original token".into(), "hash", None).unwrap();
         item.text = "replacement token".into();
         db.insert_clip(&item).unwrap();
         assert!(db.search_clips("original", false, 10).unwrap().is_empty());
         assert_eq!(db.search_clips("replacement", false, 10).unwrap().len(), 1);
         db.toggle_favorite(&item.id).unwrap();
-        db.bump_clip_timestamp(&item.id).unwrap();
+        db.bump_clip_timestamp(&item.id, None).unwrap();
         db.writer_conn.lock().unwrap().execute(
             "INSERT INTO clips_fts(clips_fts, rank) VALUES('integrity-check', 1)", [],
         ).unwrap();
@@ -909,8 +1078,8 @@ mod tests {
     fn punctuation_search_is_literal() {
         let dir = temp_db_dir();
         let db = Database::init(&dir).unwrap();
-        db.save_or_bump_text("100% complete".into(), "percent").unwrap();
-        db.save_or_bump_text("unrelated".into(), "other").unwrap();
+        db.save_or_bump_text("100% complete".into(), "percent", None).unwrap();
+        db.save_or_bump_text("unrelated".into(), "other", None).unwrap();
         assert_eq!(db.search_clips("%", false, 10).unwrap().len(), 1);
         assert!(db.search_clips("_", false, 10).unwrap().is_empty());
         drop(db);
@@ -982,7 +1151,7 @@ mod tests {
         assert_eq!(shell[0].id, "shell");
 
         for i in 0..60 {
-            db.save_or_bump_text(format!("recent {i}"), &format!("recent-{i}")).unwrap();
+            db.save_or_bump_text(format!("recent {i}"), &format!("recent-{i}"), None).unwrap();
         }
         let pool = db.get_semantic_candidates(None, false).unwrap();
         assert_eq!(pool.len(), 50);
@@ -1006,6 +1175,8 @@ mod tests {
             image_height: None,
             ocr_text: None,
             full_text_len: 16,
+            created_at: 0,
+            source_app: None,
         };
 
         let clip2 = ClipItem {
@@ -1018,6 +1189,8 @@ mod tests {
             image_height: Some(600),
             ocr_text: Some("Invoice total $450".into()),
             full_text_len: 15,
+            created_at: 0,
+            source_app: None,
         };
 
         db.insert_clip(&clip1).unwrap();
@@ -1057,7 +1230,7 @@ mod tests {
         let db = Database::init(&dir).expect("init db");
 
         // 1. Copy Apples
-        let item1 = db.save_or_bump_text("Apples".into(), "hash_apples").unwrap();
+        let item1 = db.save_or_bump_text("Apples".into(), "hash_apples", None).unwrap();
         assert_eq!(item1.text, "Apples");
 
         // Favorite Apples
@@ -1066,7 +1239,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(15));
 
         // 2. Copy Pears
-        let item2 = db.save_or_bump_text("Pears".into(), "hash_pears").unwrap();
+        let item2 = db.save_or_bump_text("Pears".into(), "hash_pears", None).unwrap();
         assert_eq!(item2.text, "Pears");
 
         let history_mid = db.get_history(10, false).unwrap();
@@ -1077,7 +1250,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(15));
 
         // 3. Copy Apples again!
-        let item3 = db.save_or_bump_text("Apples".into(), "hash_apples").unwrap();
+        let item3 = db.save_or_bump_text("Apples".into(), "hash_apples", None).unwrap();
         assert_eq!(item3.id, item1.id);
         assert!(item3.is_favorite); // Favorite preserved!
 
@@ -1106,6 +1279,8 @@ mod tests {
                 image_height: None,
                 ocr_text: None,
                 full_text_len: 8,
+                created_at: 0,
+                source_app: None,
             }
         ];
         fs::write(&legacy_file, serde_json::to_string(&old_items).unwrap()).unwrap();
@@ -1145,6 +1320,8 @@ mod tests {
             image_height: Some(100),
             ocr_text: None,
             full_text_len: 0,
+            created_at: 0,
+            source_app: None,
         };
         db.insert_image_clip(&clip, "hash_valid").unwrap();
 
@@ -1210,7 +1387,7 @@ mod tests {
         // Init Database - must upgrade and not panic
         let db = Database::init(&dir).expect("init existing db must succeed and upgrade schema");
 
-        let item = db.save_or_bump_text("Migrated test".into(), "hash123").unwrap();
+        let item = db.save_or_bump_text("Migrated test".into(), "hash123", None).unwrap();
         assert_eq!(item.text, "Migrated test");
 
         let _ = fs::remove_dir_all(&dir);
@@ -1222,7 +1399,7 @@ mod tests {
         let db = Database::init(&dir).expect("init db");
 
         // 1. Insert text clip
-        let item1 = db.save_or_bump_text("Delete me text".into(), "hash_del_1").unwrap();
+        let item1 = db.save_or_bump_text("Delete me text".into(), "hash_del_1", None).unwrap();
         assert_eq!(db.get_history(10, false).unwrap().len(), 1);
 
         // Verify FTS search finds it
@@ -1247,6 +1424,8 @@ mod tests {
             image_height: Some(200),
             ocr_text: Some("Receipt total $50".into()),
             full_text_len: 0,
+            created_at: 0,
+            source_app: None,
         };
         db.insert_image_clip(&img_clip, "hash_del_img").unwrap();
         assert_eq!(db.search_clips("Receipt", false, 10).unwrap().len(), 1);
@@ -1266,10 +1445,10 @@ mod tests {
         let dir = temp_db_dir();
         let db = Database::init(&dir).expect("init db");
 
-        let item1 = db.save_or_bump_text("Item 1".into(), "hash1").unwrap();
+        let item1 = db.save_or_bump_text("Item 1".into(), "hash1", None).unwrap();
         db.toggle_favorite(&item1.id).unwrap(); // Favorite item
 
-        let _item2 = db.save_or_bump_text("Item 2".into(), "hash2").unwrap();
+        let _item2 = db.save_or_bump_text("Item 2".into(), "hash2", None).unwrap();
 
         let img_clip = ClipItem {
             id: "img_clear_all".into(),
@@ -1281,6 +1460,8 @@ mod tests {
             image_height: Some(100),
             ocr_text: None,
             full_text_len: 0,
+            created_at: 0,
+            source_app: None,
         };
         db.insert_image_clip(&img_clip, "hash_fav_img").unwrap();
 
@@ -1303,7 +1484,7 @@ mod tests {
         let db = Database::init(&dir).expect("init db");
 
         let long_text = "A".repeat(5000);
-        let item = db.save_or_bump_text(long_text.clone(), "hash_long").unwrap();
+        let item = db.save_or_bump_text(long_text.clone(), "hash_long", None).unwrap();
         assert_eq!(item.full_text_len, 5000);
 
         // History gives preview capped at MAX_PREVIEW_LEN (1000)
@@ -1325,13 +1506,13 @@ mod tests {
         let db = Database::init(&dir).expect("init db");
 
         // 1. Create a favorite clip
-        let fav = db.save_or_bump_text("Starred secret key".into(), "hash_star").unwrap();
+        let fav = db.save_or_bump_text("Starred secret key".into(), "hash_star", None).unwrap();
         db.toggle_favorite(&fav.id).unwrap();
 
         // 2. Insert 1,200 new non-favorite clips, exceeding max_items (999)
         let max_items = 999;
         for i in 0..1200 {
-            db.save_or_bump_text(format!("Item {}", i), &format!("hash_{}", i)).unwrap();
+            db.save_or_bump_text(format!("Item {}", i), &format!("hash_{}", i), None).unwrap();
             let _ = db.prune_history(max_items);
         }
 
@@ -1359,16 +1540,118 @@ mod tests {
         let db = Database::init(&dir).expect("init db");
 
         // Disconnected clip: has "by" and lots of "code"
-        let _ = db.save_or_bump_text("isn't described by version; update code and context code code".into(), "hash_disc").unwrap();
+        let _ = db.save_or_bump_text("isn't described by version; update code and context code code".into(), "hash_disc", None).unwrap();
 
         // Exact contiguous phrase clip: starts with "By Command"
-        let _ = db.save_or_bump_text("By Command 20.6K 13.1%".into(), "hash_phrase").unwrap();
+        let _ = db.save_or_bump_text("By Command 20.6K 13.1%".into(), "hash_phrase", None).unwrap();
 
         // Search for "by co"
         let results = db.search_clips("by co", false, 10).unwrap();
         assert!(!results.is_empty());
         // Best match MUST be the contiguous phrase match
         assert!(results[0].text.starts_with("By Command"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_relative_time_formatting() {
+        let base_now = 1_700_000_000_000i64;
+
+        // Unknown / uninitialized
+        assert_eq!(format_relative_time_from(0, base_now), "");
+        assert_eq!(format_relative_time_from(-100, base_now), "");
+
+        // Clock skew / future
+        assert_eq!(format_relative_time_from(base_now + 5_000, base_now), "moments ago");
+
+        // Moments ago (< 60s)
+        assert_eq!(format_relative_time_from(base_now - 1_000, base_now), "moments ago");
+        assert_eq!(format_relative_time_from(base_now - 59_000, base_now), "moments ago");
+
+        // Minutes
+        assert_eq!(format_relative_time_from(base_now - 60_000, base_now), "1 minute ago");
+        assert_eq!(format_relative_time_from(base_now - 120_000, base_now), "2 minutes ago");
+        assert_eq!(format_relative_time_from(base_now - 59 * 60_000, base_now), "59 minutes ago");
+
+        // Hours
+        assert_eq!(format_relative_time_from(base_now - 3_600_000, base_now), "1 hour ago");
+        assert_eq!(format_relative_time_from(base_now - 3 * 3_600_000, base_now), "3 hours ago");
+        assert_eq!(format_relative_time_from(base_now - 23 * 3_600_000, base_now), "23 hours ago");
+
+        // Days
+        assert_eq!(format_relative_time_from(base_now - 86_400_000, base_now), "1 day ago");
+        assert_eq!(format_relative_time_from(base_now - 6 * 86_400_000, base_now), "6 days ago");
+        assert_eq!(format_relative_time_from(base_now - 29 * 86_400_000, base_now), "29 days ago");
+
+        // Months
+        assert_eq!(format_relative_time_from(base_now - 30 * 86_400_000, base_now), "1 month ago");
+        assert_eq!(format_relative_time_from(base_now - 60 * 86_400_000, base_now), "2 months ago");
+
+        // Years
+        assert_eq!(format_relative_time_from(base_now - 365 * 86_400_000, base_now), "1 year ago");
+        assert_eq!(format_relative_time_from(base_now - 730 * 86_400_000, base_now), "2 years ago");
+    }
+
+    #[test]
+    fn test_created_at_persistence_and_bump() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).expect("init db");
+
+        let item = db.save_or_bump_text("Timestamped clip".into(), "hash_ts", None).unwrap();
+        assert!(item.created_at > 0);
+        assert_eq!(item.relative_time(), "moments ago");
+
+        let history = db.get_history(1, false).unwrap();
+        assert_eq!(history[0].created_at, item.created_at);
+        assert_eq!(history[0].relative_time(), "moments ago");
+
+        // Search also returns created_at
+        let search = db.search_clips("Timestamped", false, 1).unwrap();
+        assert_eq!(search[0].created_at, item.created_at);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_format_app_name() {
+        assert_eq!(format_app_name("code"), "VS Code");
+        assert_eq!(format_app_name("chrome"), "Chrome");
+        assert_eq!(format_app_name("msedge"), "Edge");
+        assert_eq!(format_app_name("windowsterminal"), "Terminal");
+        assert_eq!(format_app_name("notepad"), "Notepad");
+        assert_eq!(format_app_name("custom_app"), "Custom_app");
+        assert_eq!(format_app_name(""), "");
+    }
+
+    #[test]
+    fn test_source_app_persistence_and_bump() {
+        let dir = temp_db_dir();
+        let db = Database::init(&dir).expect("init db");
+
+        // 1. Save with source app
+        let item1 = db.save_or_bump_text("App clip".into(), "hash_app", Some("code")).unwrap();
+        assert_eq!(item1.source_app.as_deref(), Some("code"));
+        assert_eq!(item1.display_source_app().as_deref(), Some("VS Code"));
+
+        // 2. Fetch from history
+        let history = db.get_history(1, false).unwrap();
+        assert_eq!(history[0].source_app.as_deref(), Some("code"));
+        assert_eq!(history[0].display_source_app().as_deref(), Some("VS Code"));
+
+        // 3. Search also returns source_app
+        let search = db.search_clips("App", false, 1).unwrap();
+        assert_eq!(search[0].source_app.as_deref(), Some("code"));
+        assert_eq!(search[0].display_source_app().as_deref(), Some("VS Code"));
+
+        // 4. Bump with new source app updates it
+        let bumped = db.save_or_bump_text("App clip".into(), "hash_app", Some("chrome")).unwrap();
+        assert_eq!(bumped.source_app.as_deref(), Some("chrome"));
+        assert_eq!(bumped.display_source_app().as_deref(), Some("Chrome"));
+
+        // 5. Bump with None preserves previous source app
+        let bumped_none = db.save_or_bump_text("App clip".into(), "hash_app", None).unwrap();
+        assert_eq!(bumped_none.source_app.as_deref(), Some("chrome"));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -3,7 +3,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arboard::Clipboard;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
@@ -19,7 +19,10 @@ use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Registry::*;
-use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess};
+use windows::Win32::System::Threading::{
+    CreateMutexW, GetCurrentProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -195,6 +198,51 @@ impl AppState {
         }
     }
 
+    pub fn get_clipboard_source_app() -> Option<String> {
+        // SAFETY: Win32 FFI queries clipboard owner / foreground HWND and its thread process ID.
+        // Stack buffer passed to QueryFullProcessImageNameW has fixed capacity and length bounds.
+        // The process handle opened with PROCESS_QUERY_LIMITED_INFORMATION is closed via CloseHandle.
+        unsafe {
+            let hwnd = GetClipboardOwner()
+                .ok()
+                .filter(|h| !h.0.is_null())
+                .unwrap_or_else(|| GetForegroundWindow());
+            if hwnd.0.is_null() {
+                return None;
+            }
+
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 || pid == std::process::id() {
+                return None;
+            }
+
+            let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return None;
+            };
+
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let success = QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            ).is_ok();
+            let _ = CloseHandle(process);
+
+            if !success || len == 0 {
+                return None;
+            }
+
+            let full_path = String::from_utf16_lossy(&buf[..len as usize]);
+            Path::new(&full_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+        }
+    }
+
     pub fn on_clipboard_update(&mut self) {
         if !self.is_monitoring.load(Ordering::Relaxed) {
             return;
@@ -204,6 +252,8 @@ impl AppState {
             return;
         };
 
+        let source_app = Self::get_clipboard_source_app();
+
         // 1. Try reading image
         if let Ok(img) = clipboard.get_image() {
             let hash = xxh3_128(&img.bytes);
@@ -212,7 +262,7 @@ impl AppState {
                 let (w, h) = (img.width as u32, img.height as u32);
 
                 if let Ok(Some(existing)) = self.db.find_image_by_hash(&hash_str) {
-                    if self.db.bump_clip_timestamp(&existing.id).is_err() {
+                    if self.db.bump_clip_timestamp(&existing.id, source_app.as_deref()).is_err() {
                         return;
                     }
                 } else {
@@ -234,6 +284,11 @@ impl AppState {
                             image_width: Some(w),
                             image_height: Some(h),
                             ocr_text: None,
+                            created_at: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as i64,
+                            source_app: source_app.clone(),
                         };
                         if self.db.insert_image_clip(&item, &hash_str).is_err() {
                             let _ = fs::remove_file(&full_path);
@@ -277,7 +332,7 @@ impl AppState {
                     let hash = xxh3_128(text.as_bytes());
                     if hash != self.last_text_hash {
                         let hash_str = format!("{:032x}", hash);
-                        if self.db.save_or_bump_text(text, &hash_str).is_err() {
+                        if self.db.save_or_bump_text(text, &hash_str, source_app.as_deref()).is_err() {
                             return;
                         }
                         self.last_text_hash = hash;
@@ -1485,6 +1540,8 @@ mod icon_tests {
             image_height: None,
             ocr_text: None,
             full_text_len: 19,
+            created_at: 0,
+            source_app: None,
         };
         let image = ClipItem {
             id: "image".into(),

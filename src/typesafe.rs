@@ -392,6 +392,8 @@ mod tests {
             image_height: None,
             ocr_text: None,
             full_text_len: 22,
+            created_at: 0,
+            source_app: None,
         }
     }
 

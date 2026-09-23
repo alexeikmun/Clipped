@@ -460,15 +460,25 @@ impl UiState {
                 d2d.draw_text("[Image Preview]", &formats.dock, &placeholder_rect, &brushes.text_muted);
             }
 
-            // Image dimensions pill badge
-            let dim_text = match (item.image_width, item.image_height) {
+            // Image dimensions pill badge & timestamp & source app
+            let time_str = item.relative_time();
+            let app_str = item.display_source_app();
+            let mut dim_text = match (item.image_width, item.image_height) {
                 (Some(w), Some(h)) => format!("IMAGE • {} × {}", w, h),
                 _ => "IMAGE".to_string(),
             };
+            if !time_str.is_empty() {
+                dim_text.push_str(" • ");
+                dim_text.push_str(&time_str);
+            }
+            if let Some(ref app) = app_str {
+                dim_text.push_str(" • ");
+                dim_text.push_str(app);
+            }
             let badge_rect = D2D_RECT_F {
                 left: card_x + 14.0,
                 top: card_y + card_h - 22.0,
-                right: card_x + 220.0,
+                right: card_x + card_w - 14.0,
                 bottom: card_y + card_h - 6.0,
             };
             d2d.draw_text(&dim_text, &formats.small, &badge_rect, &brushes.text_muted);
@@ -484,7 +494,7 @@ impl UiState {
             d2d.draw_syntax_highlighted_text(&item.text, &formats.card_text, &text_rect, &brushes.text_primary);
             d2d.pop_clip();
 
-            // Metadata footer (language tag, character count & lines)
+            // Metadata footer (language tag, character count, lines, timestamp & source app)
             let len = item.full_text_len.max(item.text.chars().count());
             let lines = item.text.lines().count();
             let lang = crate::syntax::detect_language(&item.text);
@@ -494,7 +504,23 @@ impl UiState {
                 crate::syntax::Language::Code => "CODE",
                 crate::syntax::Language::Text => "TEXT",
             };
-            let meta_text = format!("{} • {} chars • {} line{}", lang_label, len, lines, if lines == 1 { "" } else { "s" });
+            let time_str = item.relative_time();
+            let app_str = item.display_source_app();
+            let mut meta_text = format!(
+                "{} • {} chars • {} line{}",
+                lang_label,
+                len,
+                lines,
+                if lines == 1 { "" } else { "s" }
+            );
+            if !time_str.is_empty() {
+                meta_text.push_str(" • ");
+                meta_text.push_str(&time_str);
+            }
+            if let Some(ref app) = app_str {
+                meta_text.push_str(" • ");
+                meta_text.push_str(app);
+            }
             let meta_rect = D2D_RECT_F {
                 left: card_x + 14.0,
                 top: card_y + card_h - 22.0,
@@ -992,11 +1018,30 @@ impl UiState {
                 bottom: row_y + 46.0,
             };
 
+            let time_str = item.relative_time();
+            let app_str = item.display_source_app();
+            let mut combined_secondary = String::new();
+            if !time_str.is_empty() {
+                combined_secondary.push_str(&time_str);
+            }
+            if let Some(ref app) = app_str {
+                if !combined_secondary.is_empty() {
+                    combined_secondary.push_str(" • ");
+                }
+                combined_secondary.push_str(app);
+            }
+            if !snippet.secondary.is_empty() {
+                if !combined_secondary.is_empty() {
+                    combined_secondary.push_str(" • ");
+                }
+                combined_secondary.push_str(&snippet.secondary);
+            }
+
             let is_jev_top = self.has_reranked && self.reranked_top_id.as_deref() == Some(&item.id);
             let display_secondary = if is_jev_top {
-                format!("⚡ Jev Match · {}", snippet.secondary)
+                format!("⚡ Jev Match · {}", combined_secondary)
             } else {
-                snippet.secondary
+                combined_secondary
             };
 
             d2d.draw_text(
@@ -1281,6 +1326,8 @@ mod tests {
             image_height: None,
             ocr_text: None,
             full_text_len: text.len(),
+            created_at: 0,
+            source_app: None,
         }
     }
 
