@@ -148,6 +148,7 @@ impl D2dContext {
                 13.0,
                 locale,
             )?;
+            search.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
             search.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
 
             let card_text = dwrite.CreateTextFormat(
@@ -719,6 +720,64 @@ impl D2dContext {
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
+            }
+        }
+    }
+
+    pub fn draw_text_scrolled(
+        &self,
+        text: &str,
+        format: &IDWriteTextFormat,
+        rect: &D2D_RECT_F,
+        brush: &ID2D1SolidColorBrush,
+    ) {
+        if let Some(ref target) = self.render_target {
+            let utf16: Vec<u16> = text.encode_utf16().collect();
+            let max_w = rect.right - rect.left;
+            let max_h = rect.bottom - rect.top;
+            if max_w <= 0.0 || max_h <= 0.0 {
+                return;
+            }
+
+            // SAFETY: Direct2D and DirectWrite COM calls operate on initialized target and factory.
+            // Temporary text layout is queried for single-line width metrics and PushAxisAlignedClip is matched by PopAxisAlignedClip.
+            unsafe {
+                let mut text_w = 0.0;
+                if let Ok(layout) = self.dwrite_factory.CreateTextLayout(&utf16, format, 10000.0, max_h) {
+                    let mut metrics = DWRITE_TEXT_METRICS::default();
+                    if layout.GetMetrics(&mut metrics).is_ok() {
+                        text_w = metrics.widthIncludingTrailingWhitespace;
+                    }
+                }
+
+                if text_w > max_w {
+                    let offset_x = text_w - max_w;
+                    target.PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    let shifted_rect = D2D_RECT_F {
+                        left: rect.left - offset_x,
+                        top: rect.top,
+                        right: rect.left - offset_x + text_w + 10.0,
+                        bottom: rect.bottom,
+                    };
+                    target.DrawText(
+                        &utf16,
+                        format,
+                        &shifted_rect,
+                        brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                    target.PopAxisAlignedClip();
+                } else {
+                    target.DrawText(
+                        &utf16,
+                        format,
+                        rect,
+                        brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
             }
         }
     }

@@ -337,21 +337,21 @@ impl UiState {
             };
 
             if self.search_query.is_empty() {
-                d2d.draw_text("Type to search, or > for AI...", &formats.search, &search_text_rect, &brushes.text_muted);
+                d2d.draw_text_scrolled("Type to search, or > for AI...", &formats.search, &search_text_rect, &brushes.text_muted);
             } else if self.search_query == ">" {
                 let display_text = if self.cursor_visible {
                     ">| Type AI query...".to_string()
                 } else {
                     "> Type AI query...".to_string()
                 };
-                d2d.draw_text(&display_text, &formats.search, &search_text_rect, &brushes.favorite);
+                d2d.draw_text_scrolled(&display_text, &formats.search, &search_text_rect, &brushes.favorite);
             } else {
                 let display_text = if self.cursor_visible {
                     format!("{}|", self.search_query)
                 } else {
                     self.search_query.clone()
                 };
-                d2d.draw_text(&display_text, &formats.search, &search_text_rect, &brushes.text_primary);
+                d2d.draw_text_scrolled(&display_text, &formats.search, &search_text_rect, &brushes.text_primary);
             }
 
             if self.is_reranking {
