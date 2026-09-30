@@ -26,14 +26,10 @@ pub struct JevRequest<'a> {
     pub questions: serde_json::Value,
 }
 
-#[allow(dead_code)]
+/// Only the winning option is used; `probabilities` / `confidence` are ignored on parse.
 #[derive(Deserialize, Debug, Clone)]
 pub struct ChoiceAnswer {
     pub choice: String,
-    #[serde(default)]
-    pub probabilities: HashMap<String, f64>,
-    #[serde(default)]
-    pub confidence: f64,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -52,10 +48,8 @@ pub enum JevAnswer {
     Other,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 pub struct JevResponse {
-    pub model: Option<String>,
     #[serde(default)]
     pub answers: HashMap<String, JevAnswer>,
 }
@@ -691,7 +685,6 @@ mod tests {
             "usage": {"input_tokens": 392, "output_tokens": 65}
         }"#;
         let parsed: JevResponse = serde_json::from_str(json_resp).unwrap();
-        assert_eq!(parsed.model.as_deref(), Some("jev-1.13.0"));
         assert!((noul_answer(&parsed, "has_match").unwrap() - 0.88).abs() < 1e-4);
         assert_eq!(choice_answer(&parsed, "best_match").unwrap(), "1");
         assert!(matches!(parsed.answers.get("rating"), Some(JevAnswer::Other)));

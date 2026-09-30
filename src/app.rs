@@ -114,6 +114,13 @@ fn visible_clips(db: &Database, ui: &crate::ui::UiState) -> Vec<ClipItem> {
     }
 }
 
+/// Image paths are stored absolute for new clips and relative to the data dir for legacy ones.
+fn remove_image_files(data_dir: &Path, paths: impl IntoIterator<Item = String>) {
+    for p in paths {
+        let _ = fs::remove_file(data_dir.join(p));
+    }
+}
+
 pub struct AppState {
     pub hwnd: HWND,
     pub d2d: D2dContext,
@@ -276,6 +283,12 @@ impl AppState {
         }
     }
 
+    fn prune_history(&self) {
+        if let Ok(deleted) = self.db.prune_history(self.ui.settings.max_items) {
+            remove_image_files(&self.ui.data_dir, deleted);
+        }
+    }
+
     pub fn on_clipboard_update(&mut self) {
         if !self.is_monitoring.load(Ordering::Relaxed) {
             return;
@@ -339,18 +352,7 @@ impl AppState {
                 self.last_image_hash = hash;
                 self.last_text_hash = 0;
 
-                // Prune
-                if let Ok(deleted) = self.db.prune_history(self.ui.settings.max_items) {
-                    for p in deleted {
-                        let path = Path::new(&p);
-                        let full = if path.is_absolute() {
-                            path.to_path_buf()
-                        } else {
-                            self.ui.data_dir.join(path)
-                        };
-                        let _ = fs::remove_file(full);
-                    }
-                }
+                self.prune_history();
 
                 self.refresh_ui_clips();
             }
@@ -371,18 +373,7 @@ impl AppState {
                         self.last_text_hash = hash;
                         self.last_image_hash = 0;
 
-                        // Prune
-                        if let Ok(deleted) = self.db.prune_history(self.ui.settings.max_items) {
-                            for p in deleted {
-                                let path = Path::new(&p);
-                                let full = if path.is_absolute() {
-                                    path.to_path_buf()
-                                } else {
-                                    self.ui.data_dir.join(path)
-                                };
-                                let _ = fs::remove_file(full);
-                            }
-                        }
+                        self.prune_history();
 
                         self.refresh_ui_clips();
                     }
@@ -500,13 +491,7 @@ impl AppState {
         if let Some(clip) = self.ui.selected_clip() {
             let id = clip.id.clone();
             if let Ok(Some(img_path)) = self.db.delete_clip(&id) {
-                let path = Path::new(&img_path);
-                let full = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    self.ui.data_dir.join(path)
-                };
-                let _ = fs::remove_file(full);
+                remove_image_files(&self.ui.data_dir, [img_path]);
             }
             let curr_idx = self.ui.selected_index;
             self.last_text_hash = 0;
@@ -574,6 +559,7 @@ unsafe fn hide_modal(state_ptr: *mut AppState) {
         state.ui.jev_status = JevStatus::Idle;
         state.ui.jev_result = None;
         state.ui.hover_target = HitTarget::None;
+        state.ui.key_draft = None;
 
         // Evict cached Direct2D textures from VRAM/RAM
         state.d2d.clear_bitmap_cache();
@@ -801,7 +787,6 @@ pub fn run_app() -> windows::core::Result<()> {
         // Initial memory purge
         let _ = EmptyWorkingSet(GetCurrentProcess());
 
-        println!("Clipped (Pure Win32 + Direct2D) running with ~3 MB memory footprint!");
 
         let is_autostart = std::env::args().any(|a| a == "--autostart" || a == "--minimized");
 
@@ -1001,11 +986,11 @@ unsafe extern "system" fn wnd_proc(
 
         WM_TIMER => {
             if wparam.0 == TIMER_BLINK_ID {
-                let is_search = {
+                let is_typing = {
                     let state = &*state_ptr;
-                    state.ui.mode == UiMode::SearchList
+                    state.ui.mode == UiMode::SearchList || state.ui.key_draft.is_some()
                 };
-                if is_search && IsWindowVisible(hwnd).as_bool() {
+                if is_typing && IsWindowVisible(hwnd).as_bool() {
                     let _ = InvalidateRect(hwnd, None, false);
                 }
             } else if wparam.0 == TIMER_RERANK_DEBOUNCE_ID {
@@ -1058,7 +1043,21 @@ unsafe extern "system" fn wnd_proc(
                 state.ui.hit_test(lx, ly)
             };
 
+            {
+                let state = &mut *state_ptr;
+                if hit != HitTarget::ApiKeyField && state.ui.key_draft.take().is_some() {
+                    let _ = InvalidateRect(hwnd, None, false);
+                }
+            }
             match hit {
+                HitTarget::ApiKeyField => {
+                    let state = &mut *state_ptr;
+                    if state.ui.key_draft.is_none() {
+                        state.ui.begin_key_edit();
+                        let _ = SetTimer(hwnd, TIMER_BLINK_ID, 500, None);
+                    }
+                    let _ = InvalidateRect(hwnd, None, false);
+                }
                 HitTarget::FavFilter => {
                     let state = &mut *state_ptr;
                     state.ui.show_favorites = !state.ui.show_favorites;
@@ -1111,15 +1110,7 @@ unsafe extern "system" fn wnd_proc(
                 HitTarget::ClearNonFavorites => {
                     let state = &mut *state_ptr;
                     if let Ok(deleted) = state.db.prune_history(0) {
-                        for p in deleted {
-                            let path = Path::new(&p);
-                            let full = if path.is_absolute() {
-                                path.to_path_buf()
-                            } else {
-                                state.ui.data_dir.join(path)
-                            };
-                            let _ = fs::remove_file(full);
-                        }
+                        remove_image_files(&state.ui.data_dir, deleted);
                     }
                     state.ui.settings_message = "Non-favorites cleared!".to_string();
                     state.last_text_hash = 0;
@@ -1130,15 +1121,7 @@ unsafe extern "system" fn wnd_proc(
                 HitTarget::ClearAll => {
                     let state = &mut *state_ptr;
                     if let Ok(deleted) = state.db.clear_all_history() {
-                        for p in deleted {
-                            let path = Path::new(&p);
-                            let full = if path.is_absolute() {
-                                path.to_path_buf()
-                            } else {
-                                state.ui.data_dir.join(path)
-                            };
-                            let _ = fs::remove_file(full);
-                        }
+                        remove_image_files(&state.ui.data_dir, deleted);
                     }
                     state.ui.settings_message = "History cleared!".to_string();
                     state.last_text_hash = 0;
@@ -1166,6 +1149,25 @@ unsafe extern "system" fn wnd_proc(
 
         WM_KEYDOWN => {
             let key = VIRTUAL_KEY(wparam.0 as u16);
+            if (*state_ptr).ui.key_draft.is_some() {
+                let state = &mut *state_ptr;
+                match key {
+                    VK_RETURN => {
+                        state.ui.commit_key_edit();
+                        save_settings(&state.ui.data_dir, &state.ui.settings);
+                    }
+                    VK_ESCAPE => state.ui.key_draft = None,
+                    VK_BACK => state.ui.key_backspace(),
+                    VK_V if GetKeyState(VK_CONTROL.0 as i32) < 0 => {
+                        if let Ok(text) = Clipboard::new().and_then(|mut c| c.get_text()) {
+                            state.ui.key_input(text.trim());
+                        }
+                    }
+                    _ => {}
+                }
+                let _ = InvalidateRect(hwnd, None, false);
+                return LRESULT(0);
+            }
             match key {
                 VK_TAB => {
                     let state = &mut *state_ptr;
@@ -1252,6 +1254,13 @@ unsafe extern "system" fn wnd_proc(
             let Some(ch) = decode_input_unit(&mut state.pending_surrogate, wparam.0 as u16) else {
                 return LRESULT(0);
             };
+            if state.ui.key_draft.is_some() {
+                if !ch.is_control() {
+                    state.ui.key_input(ch.encode_utf8(&mut [0; 4]));
+                    let _ = InvalidateRect(hwnd, None, false);
+                }
+                return LRESULT(0);
+            }
             if !ch.is_control() && state.ui.mode != UiMode::Settings {
                 // In SingleCard mode, check for number navigation 1-9
                 if state.ui.mode == UiMode::SingleCard && ('1'..='9').contains(&ch) {
@@ -1504,6 +1513,23 @@ mod icon_tests {
             full_text_len: text.len(),
             ..ClipItem::default()
         }
+    }
+
+    #[test]
+    fn test_remove_image_files_handles_absolute_and_legacy_relative_paths() {
+        let dir = std::env::temp_dir().join(format!("clipped_rm_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(dir.join("images")).unwrap();
+        let absolute = dir.join("images").join("a.png");
+        fs::write(&absolute, b"a").unwrap();
+        fs::write(dir.join("images").join("b.png"), b"b").unwrap();
+        remove_image_files(&dir, [
+            absolute.to_string_lossy().replace('\\', "/"),
+            "images/b.png".to_string(),
+            "images/missing.png".to_string(),
+        ]);
+        assert!(!absolute.exists());
+        assert!(!dir.join("images").join("b.png").exists());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

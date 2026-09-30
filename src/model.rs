@@ -78,6 +78,7 @@ pub enum HitTarget {
     DockStar,
     ListItem(usize),
     SettingsBootToggle,
+    ApiKeyField,
     ClearNonFavorites,
     ClearAll,
 }

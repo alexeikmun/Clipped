@@ -5,20 +5,21 @@ SetCompressor /SOLID lzma
 
 ; General
 Name "Clipped"
-OutFile "releases\download\clipped_0.7.0_x64-setup.exe"
+!system 'cmd.exe /c if not exist "releases\download" mkdir "releases\download"'
+OutFile "releases\download\clipped_0.8.0_x64-setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\Clipped"
 InstallDirRegKey HKCU "Software\Alexis\Clipped" "InstallLocation"
 RequestExecutionLevel user
 Unicode true
 
 ; Version Info
-VIProductVersion "0.7.0.0"
+VIProductVersion "0.8.0.0"
 VIAddVersionKey "ProductName" "Clipped"
 VIAddVersionKey "CompanyName" "Alexis"
 VIAddVersionKey "LegalCopyright" "Alexis"
 VIAddVersionKey "FileDescription" "Clipped Installer"
-VIAddVersionKey "FileVersion" "0.7.0.0"
-VIAddVersionKey "ProductVersion" "0.7.0"
+VIAddVersionKey "FileVersion" "0.8.0.0"
+VIAddVersionKey "ProductVersion" "0.8.0"
 
 ; Interface Settings
 !define MUI_ABORTWARNING
@@ -68,7 +69,7 @@ Section "Clipped" SecClipped
 
     ; Write Add/Remove Programs registry entries
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Clipped" "DisplayName" "Clipped"
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Clipped" "DisplayVersion" "0.7.0"
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Clipped" "DisplayVersion" "0.8.0"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Clipped" "Publisher" "Alexis"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Clipped" "DisplayIcon" "$INSTDIR\icon.ico"
     WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Clipped" "UninstallString" '"$INSTDIR\uninstall.exe"'

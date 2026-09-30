@@ -682,10 +682,8 @@ impl Database {
             if !filter.matches(&item, now_ms) {
                 continue;
             }
-            // Keep complete JSON so later format detection (Jev clip kinds) stays exact.
-            if crate::typesafe::clip_format(&item) != "JSON" {
-                item.text = truncate_preview(&item.text, MAX_PREVIEW_LEN);
-            }
+            // Results live in the UI list; a multi-MB JSON clip must not stay resident.
+            item.text = truncate_preview(&item.text, MAX_PREVIEW_LEN);
             item.ocr_text = item.ocr_text.map(|s| truncate_preview(&s, MAX_PREVIEW_LEN));
             items.push(item);
         }
@@ -1136,10 +1134,12 @@ mod tests {
         let fav_filter = ClipFilter { favorites_only: true, ..only("image") };
         assert_eq!(db.get_filtered_clips(&fav_filter, false).unwrap().len(), 1);
 
+        // Matched on the full text, returned as a bounded preview.
         let json = db.get_filtered_clips(&only("JSON"), false).unwrap();
         assert_eq!(json.len(), 1);
-        assert_eq!(crate::typesafe::clip_format(&json[0]), "JSON");
-        assert!(json[0].text.len() > MAX_PREVIEW_LEN);
+        assert_eq!(json[0].id, "json");
+        assert_eq!(json[0].text.chars().count(), MAX_PREVIEW_LEN);
+        assert!(json[0].full_text_len > MAX_PREVIEW_LEN);
         let shell = db.get_filtered_clips(&only("shell command"), false).unwrap();
         assert_eq!(shell.len(), 1);
         assert_eq!(shell[0].id, "shell");

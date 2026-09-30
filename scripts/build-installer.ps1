@@ -8,17 +8,17 @@ if (-not $makensis) {
 }
 
 $version = (Get-Content "Cargo.toml" | Select-String '^version\s*=\s*"(.*)"').Matches.Groups[1].Value
-if (-not $version) { $version = "0.7.0" }
+if (-not $version) { $version = "0.8.0" }
 
 # Build release binary
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "Release build failed ($LASTEXITCODE)." }
 
-& $makensis "installer.nsi"
-if ($LASTEXITCODE -ne 0) { throw "Installer build failed ($LASTEXITCODE)." }
-
 # Ensure output directory exists
 New-Item -ItemType Directory -Force -Path "releases\download" | Out-Null
+
+& $makensis "installer.nsi"
+if ($LASTEXITCODE -ne 0) { throw "Installer build failed ($LASTEXITCODE)." }
 
 # Copy standalone binaries
 Copy-Item -Path "target\release\clipped.exe" -Destination "releases\download\clipped.exe" -Force

@@ -18,6 +18,8 @@ pub struct UiState {
     pub clips: Vec<ClipItem>,
     pub settings: AppSettings,
     pub settings_message: String,
+    /// `Some` while the API key field is being edited; never rendered unmasked.
+    pub key_draft: Option<String>,
     pub data_dir: PathBuf,
     pub jev_status: JevStatus,
     /// Last completed Jev search; kept on screen while a newer query is in flight.
@@ -46,6 +48,7 @@ impl UiState {
             clips: Vec::new(),
             settings,
             settings_message: String::new(),
+            key_draft: None,
             data_dir,
             jev_status: JevStatus::Idle,
             jev_result: None,
@@ -93,7 +96,7 @@ impl UiState {
 
     pub fn hit_test(&self, x: f32, y: f32) -> HitTarget {
         // Window bounds
-        if x < 0.0 || x > WINDOW_WIDTH || y < 0.0 || y > WINDOW_HEIGHT {
+        if !(0.0..=WINDOW_WIDTH).contains(&x) || !(0.0..=WINDOW_HEIGHT).contains(&y) {
             return HitTarget::None;
         }
 
@@ -146,6 +149,10 @@ impl UiState {
                 // Clear all: x: 246.0..456.0, y: 150.0..184.0
                 if (246.0..=456.0).contains(&x) && (150.0..=184.0).contains(&y) {
                     return HitTarget::ClearAll;
+                }
+                // API key field: x: 154.0..456.0, y: 198.0..226.0
+                if (154.0..=456.0).contains(&x) && (198.0..=226.0).contains(&y) {
+                    return HitTarget::ApiKeyField;
                 }
             }
             UiMode::SearchList => {
@@ -848,6 +855,15 @@ fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
     }
 }
 
+const MAX_KEY_CHARS: usize = 512;
+
+/// Shows only the last four characters so a key on screen can be recognized, not copied.
+fn mask_key(key: &str) -> String {
+    let count = key.chars().count();
+    let tail: String = key.chars().skip(count.saturating_sub(4)).collect();
+    format!("{}{tail}", "•".repeat(count.saturating_sub(4).min(12)))
+}
+
 impl UiState {
     /// Distinguishes "still searching" and "Jev failed" from a genuine empty result.
     pub fn empty_list_message(&self) -> String {
@@ -1109,6 +1125,56 @@ impl UiState {
         );
     }
 
+    /// Text for the API key field and whether it shows a value (vs. a hint).
+    fn api_key_display(&self) -> (String, bool) {
+        match &self.key_draft {
+            Some(draft) if draft.is_empty() => ("Paste key, Enter to save, Esc to cancel".into(), false),
+            Some(draft) => (mask_key(draft), true),
+            None => match self.settings.typesafe_api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+                Some(key) => (mask_key(key), true),
+                None if std::env::var("TYPESAFE_API_KEY").is_ok_and(|k| !k.trim().is_empty()) => {
+                    ("Using TYPESAFE_API_KEY variable".into(), false)
+                }
+                None => ("Click to add a key for > search".into(), false),
+            },
+        }
+    }
+
+    pub fn begin_key_edit(&mut self) {
+        self.key_draft = Some(String::new());
+        self.settings_message.clear();
+    }
+
+    /// Typed or pasted text; control characters and line breaks are dropped.
+    pub fn key_input(&mut self, text: &str) {
+        if let Some(draft) = &mut self.key_draft {
+            draft.extend(text.chars().filter(|c| !c.is_control() && !c.is_whitespace()));
+            draft.truncate(draft.char_indices().nth(MAX_KEY_CHARS).map_or(draft.len(), |(i, _)| i));
+        }
+    }
+
+    pub fn key_backspace(&mut self) {
+        if let Some(draft) = &mut self.key_draft {
+            draft.pop();
+        }
+    }
+
+    /// Stores the draft (empty removes the key). Returns false if nothing was being edited.
+    pub fn commit_key_edit(&mut self) -> bool {
+        let Some(draft) = self.key_draft.take() else {
+            return false;
+        };
+        self.settings_message = if draft.is_empty() {
+            "API key removed".into()
+        } else if std::env::var("TYPESAFE_API_KEY").is_ok_and(|k| !k.trim().is_empty()) {
+            "Saved, but TYPESAFE_API_KEY variable takes priority".into()
+        } else {
+            "API key saved".into()
+        };
+        self.settings.typesafe_api_key = (!draft.is_empty()).then_some(draft);
+        true
+    }
+
     fn render_settings(&self, d2d: &D2dContext) {
         let brushes = d2d.brushes.as_ref().unwrap();
         let formats = d2d.formats.as_ref().unwrap();
@@ -1266,8 +1332,36 @@ impl UiState {
             },
         );
 
-        // Section 4: System info & specs
-        let info_y = 210.0;
+        // Section 4: TypeSafe API key for `>` search
+        let key_y = 198.0;
+        d2d.draw_text(
+            "TypeSafe API Key:",
+            &formats.label,
+            &D2D_RECT_F { left: panel_x, top: key_y + 4.0, right: panel_x + 130.0, bottom: key_y + 24.0 },
+            &brushes.text_primary,
+        );
+        let is_editing = self.key_draft.is_some();
+        let is_key_hover = self.hover_target == HitTarget::ApiKeyField;
+        d2d.draw_rounded_rect(
+            panel_x + 130.0,
+            key_y,
+            panel_w - 130.0,
+            28.0,
+            6.0,
+            if is_key_hover && !is_editing { &brushes.card_hover } else { &brushes.search_bg },
+            Some((if is_editing { &brushes.accent } else { &brushes.border }, 1.0)),
+        );
+        let (key_text, key_brush) = self.api_key_display();
+        let key_text = if is_editing && key_brush && self.cursor_visible { format!("{key_text}|") } else { key_text };
+        d2d.draw_text_scrolled(
+            &key_text,
+            &formats.search,
+            &D2D_RECT_F { left: panel_x + 140.0, top: key_y, right: panel_x + panel_w - 10.0, bottom: key_y + 28.0 },
+            if key_brush { &brushes.text_primary } else { &brushes.text_muted },
+        );
+
+        // Section 5: System info & specs
+        let info_y = 244.0;
         let info_rect = D2D_RECT_F {
             left: panel_x,
             top: info_y,
@@ -1301,6 +1395,52 @@ impl UiState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_key_edit_masks_sanitizes_and_commits() {
+        let mut ui = UiState::new(PathBuf::new(), AppSettings::default());
+        ui.mode = UiMode::Settings;
+        assert_eq!(ui.hit_test(300.0, 212.0), HitTarget::ApiKeyField);
+        assert_eq!(ui.hit_test(100.0, 212.0), HitTarget::None, "label is not the field");
+
+        // Typing is ignored until the field is opened.
+        ui.key_input("ignored");
+        assert!(ui.key_draft.is_none());
+
+        ui.begin_key_edit();
+        ui.key_input(" sk-test
+");
+        ui.key_input("1234");
+        ui.key_backspace();
+        assert_eq!(ui.key_draft.as_deref(), Some("sk-test123"));
+        assert_eq!(ui.api_key_display(), ("••••••t123".to_string(), true));
+        assert!(ui.commit_key_edit());
+        assert_eq!(ui.settings.typesafe_api_key.as_deref(), Some("sk-test123"));
+        assert!(ui.key_draft.is_none());
+        assert!(!ui.commit_key_edit(), "nothing left to commit");
+
+        // Cancelling keeps the saved key; committing an empty draft removes it.
+        ui.begin_key_edit();
+        ui.key_input("other");
+        ui.key_draft = None;
+        assert_eq!(ui.settings.typesafe_api_key.as_deref(), Some("sk-test123"));
+        ui.begin_key_edit();
+        assert!(ui.commit_key_edit());
+        assert!(ui.settings.typesafe_api_key.is_none());
+        assert_eq!(ui.settings_message, "API key removed");
+
+        ui.begin_key_edit();
+        ui.key_input(&"x".repeat(MAX_KEY_CHARS + 50));
+        assert_eq!(ui.key_draft.as_ref().unwrap().chars().count(), MAX_KEY_CHARS);
+    }
+
+    #[test]
+    fn mask_key_reveals_only_the_last_four_characters() {
+        assert_eq!(mask_key("sk-test123"), "••••••t123");
+        assert_eq!(mask_key("abc"), "abc");
+        assert_eq!(mask_key(&"k".repeat(100)).chars().count(), 16, "length is not revealed");
+        assert!(!mask_key("secret-value-9876").contains("secret"));
+    }
 
     #[test]
     fn unicode_search_maps_original_boundaries() {
