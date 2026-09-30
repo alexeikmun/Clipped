@@ -19,9 +19,17 @@ pub struct UiState {
     pub settings: AppSettings,
     pub settings_message: String,
     pub data_dir: PathBuf,
-    pub is_reranking: bool,
-    pub has_reranked: bool,
-    pub reranked_top_id: Option<String>,
+    pub jev_status: JevStatus,
+    /// Last completed Jev search; kept on screen while a newer query is in flight.
+    pub jev_result: Option<crate::typesafe::JevSearch>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum JevStatus {
+    Idle,
+    Searching,
+    Ready,
+    Failed(String),
 }
 
 impl UiState {
@@ -39,9 +47,8 @@ impl UiState {
             settings,
             settings_message: String::new(),
             data_dir,
-            is_reranking: false,
-            has_reranked: false,
-            reranked_top_id: None,
+            jev_status: JevStatus::Idle,
+            jev_result: None,
         }
     }
 
@@ -328,7 +335,7 @@ impl UiState {
                 if is_jev_mode { &brushes.favorite } else { &brushes.accent },
             );
 
-            let badge_w = if is_jev_mode || self.is_reranking || self.has_reranked { 56.0 } else { 0.0 };
+            let badge_w = if is_jev_mode { 56.0 } else { 0.0 };
             let search_text_rect = D2D_RECT_F {
                 left: search_x + 24.0,
                 top: 12.0,
@@ -354,7 +361,7 @@ impl UiState {
                 d2d.draw_text_scrolled(&display_text, &formats.search, &search_text_rect, &brushes.text_primary);
             }
 
-            if self.is_reranking {
+            if is_jev_mode && self.jev_status == JevStatus::Searching {
                 let badge_rect = D2D_RECT_F {
                     left: search_x + search_w - 56.0,
                     top: 15.0,
@@ -362,7 +369,7 @@ impl UiState {
                     bottom: 15.0 + search_h - 6.0,
                 };
                 d2d.draw_text("⚡ Jev...", &formats.small, &badge_rect, &brushes.accent);
-            } else if self.has_reranked {
+            } else if is_jev_mode && self.jev_status == JevStatus::Ready {
                 let badge_rect = D2D_RECT_F {
                     left: search_x + search_w - 48.0,
                     top: 15.0,
@@ -842,6 +849,23 @@ fn get_match_snippet(item: &crate::db::ClipItem, query: &str) -> MatchSnippet {
 }
 
 impl UiState {
+    /// Distinguishes "still searching" and "Jev failed" from a genuine empty result.
+    pub fn empty_list_message(&self) -> String {
+        if crate::typesafe::semantic_query(&self.search_query).is_some_and(|q| !q.is_empty()) {
+            match &self.jev_status {
+                JevStatus::Failed(msg) => return msg.clone(),
+                JevStatus::Searching => return "Searching with Jev…".into(),
+                JevStatus::Ready => return "No clips match that description".into(),
+                JevStatus::Idle => {}
+            }
+        }
+        if self.show_favorites {
+            "No favorites saved yet\nClick the star on any clip to favorite".into()
+        } else {
+            "No matching clips found".into()
+        }
+    }
+
     fn render_search_list(&self, d2d: &D2dContext) {
         let brushes = d2d.brushes.as_ref().unwrap();
         let formats = d2d.formats.as_ref().unwrap();
@@ -862,11 +886,7 @@ impl UiState {
                 bottom: list_y + 140.0,
             };
             d2d.draw_text(
-                if self.show_favorites {
-                    "No favorites saved yet\nClick the star on any clip to favorite"
-                } else {
-                    "No matching clips found"
-                },
+                &self.empty_list_message(),
                 &formats.dock,
                 &empty_rect,
                 &brushes.text_muted,
@@ -1037,18 +1057,11 @@ impl UiState {
                 combined_secondary.push_str(&snippet.secondary);
             }
 
-            let is_jev_top = self.has_reranked && self.reranked_top_id.as_deref() == Some(&item.id);
-            let display_secondary = if is_jev_top {
-                format!("⚡ Jev Match · {}", combined_secondary)
-            } else {
-                combined_secondary
-            };
-
             d2d.draw_text(
-                &display_secondary,
+                &combined_secondary,
                 &formats.meta,
                 &secondary_rect,
-                if is_jev_top { &brushes.accent } else { &brushes.text_muted },
+                &brushes.text_muted,
             );
 
             // Right star indicator if favorite

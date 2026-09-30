@@ -648,12 +648,13 @@ impl Database {
         Ok(items)
     }
 
-    /// Scan by recency without FTS, reserving room for images even in text-heavy history.
-    pub fn get_semantic_candidates(
+    /// Every clip passing a Jev filter, newest first. Scans the whole history so "all X" means all.
+    pub fn get_filtered_clips(
         &self,
-        format: Option<&str>,
+        filter: &crate::typesafe::ClipFilter,
         favorites_only: bool,
     ) -> Result<Vec<ClipItem>> {
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
         let conn = self.reader_conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, text, is_favorite, clip_type, image_path, image_width, image_height, ocr_text, created_at, source_app
@@ -662,7 +663,6 @@ impl Database {
         )?;
         let mut rows = stmt.query(params![favorites_only])?;
         let mut items = Vec::new();
-        let (mut texts, mut images) = (0, 0);
         while let Some(row) = rows.next()? {
             let text: String = row.get(1)?;
             let mut item = ClipItem {
@@ -678,32 +678,30 @@ impl Database {
                 created_at: row.get(8)?,
                 source_app: row.get(9)?,
             };
-            if let Some(format) = format {
-                if crate::typesafe::clip_format(&item) != format {
-                    continue;
-                }
-            } else if item.clip_type == "image" {
-                if images == 10 {
-                    continue;
-                }
-                images += 1;
-            } else {
-                if texts == 40 {
-                    continue;
-                }
-                texts += 1;
+            // Match on the full text so format detection is exact, then keep previews bounded.
+            if !filter.matches(&item, now_ms) {
+                continue;
             }
-            // Keep complete JSON for format detection; other previews remain bounded.
+            // Keep complete JSON so later format detection (Jev clip kinds) stays exact.
             if crate::typesafe::clip_format(&item) != "JSON" {
                 item.text = truncate_preview(&item.text, MAX_PREVIEW_LEN);
             }
             item.ocr_text = item.ocr_text.map(|s| truncate_preview(&s, MAX_PREVIEW_LEN));
             items.push(item);
-            if items.len() == 50 {
-                break;
-            }
         }
         Ok(items)
+    }
+
+    /// Distinct source apps (lowercased process names), most recently used first.
+    pub fn get_source_apps(&self) -> Result<Vec<String>> {
+        let conn = self.reader_conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT lower(source_app) AS app FROM clips
+             WHERE source_app IS NOT NULL AND trim(source_app) != ''
+             GROUP BY app ORDER BY MAX(created_at) DESC"
+        )?;
+        let apps = stmt.query_map([], |row| row.get(0))?;
+        apps.collect()
     }
 
     fn query_fts_ranked(
@@ -1093,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn test_semantic_candidates_include_buried_formats_and_respect_favorites() {
+    fn test_filtered_clips_scan_whole_history_and_respect_favorites() {
         let dir = temp_db_dir();
         let db = Database::init(&dir).unwrap();
         {
@@ -1121,41 +1119,40 @@ mod tests {
                 ).unwrap();
             }
         }
+        use crate::typesafe::{AppFilter, ClipFilter};
+        let only = |format| ClipFilter { format: Some(format), ..ClipFilter::default() };
         assert!(db.get_history(25, false).unwrap().iter().all(|c| c.clip_type == "text"));
-        let pool = db.get_semantic_candidates(None, false).unwrap();
-        assert_eq!(pool.iter().filter(|c| c.clip_type == "image").count(), 10);
-        assert!(pool.iter().any(|c| c.id == "image-29"));
+        let pool = db.get_filtered_clips(&ClipFilter::default(), false).unwrap();
+        assert_eq!(pool.len(), 64);
         assert_eq!(pool.iter().map(|c| &c.id).collect::<HashSet<_>>().len(), pool.len());
 
-        for raw in ["show only images", "> show only images"] {
-            let query = crate::typesafe::semantic_query(raw).unwrap();
-            let items = db.get_semantic_candidates(
-                crate::typesafe::requested_format(query), false,
-            ).unwrap();
-            assert_eq!(items.len(), 30);
-            assert!(items.iter().all(|c| c.clip_type == "image"));
-        }
-        let favs = db.get_semantic_candidates(None, true).unwrap();
+        // "All images" returns every image, not a recency-capped sample.
+        let images = db.get_filtered_clips(&only("image"), false).unwrap();
+        assert_eq!(images.len(), 30);
+        assert_eq!(images[0].id, "image-29");
+        let favs = db.get_filtered_clips(&ClipFilter::default(), true).unwrap();
         assert_eq!(favs.len(), 2);
         assert!(favs.iter().all(|c| c.is_favorite));
-        let images = db.get_semantic_candidates(Some("image"), true).unwrap();
-        assert_eq!(images.len(), 1);
-        assert_eq!(images[0].id, "image-29");
+        let fav_filter = ClipFilter { favorites_only: true, ..only("image") };
+        assert_eq!(db.get_filtered_clips(&fav_filter, false).unwrap().len(), 1);
 
-        let json = db.get_semantic_candidates(Some("JSON"), false).unwrap();
+        let json = db.get_filtered_clips(&only("JSON"), false).unwrap();
         assert_eq!(json.len(), 1);
         assert_eq!(crate::typesafe::clip_format(&json[0]), "JSON");
         assert!(json[0].text.len() > MAX_PREVIEW_LEN);
-        let shell = db.get_semantic_candidates(Some("shell command"), false).unwrap();
+        let shell = db.get_filtered_clips(&only("shell command"), false).unwrap();
         assert_eq!(shell.len(), 1);
         assert_eq!(shell[0].id, "shell");
 
-        for i in 0..60 {
-            db.save_or_bump_text(format!("recent {i}"), &format!("recent-{i}"), None).unwrap();
-        }
-        let pool = db.get_semantic_candidates(None, false).unwrap();
-        assert_eq!(pool.len(), 50);
-        assert_eq!(pool.iter().filter(|c| c.clip_type == "image").count(), 10);
+        db.save_or_bump_text("from chrome".into(), "h-chrome", Some("Chrome")).unwrap();
+        db.save_or_bump_text("from slack".into(), "h-slack", Some("slack")).unwrap();
+        db.save_or_bump_text("chrome again".into(), "h-chrome2", Some("chrome")).unwrap();
+        let mut apps = db.get_source_apps().unwrap();
+        apps.sort();
+        assert_eq!(apps, ["chrome", "slack"], "deduplicated case-insensitively");
+        let chrome = ClipFilter { app: AppFilter::App("chrome".into()), ..ClipFilter::default() };
+        let texts: Vec<_> = db.get_filtered_clips(&chrome, false).unwrap().into_iter().map(|c| c.text).collect();
+        assert_eq!(texts, ["chrome again", "from chrome"]);
         drop(db);
         fs::remove_dir_all(dir).unwrap();
     }

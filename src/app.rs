@@ -36,6 +36,8 @@ use crate::model::{
     AppSettings, HitTarget, UiMode, SETTINGS_FILE, WINDOW_HEIGHT, WINDOW_WIDTH,
 };
 use crate::paste::perform_paste;
+use crate::typesafe::JevSearch;
+use crate::ui::JevStatus;
 
 const WM_TRAYICON: u32 = WM_USER + 1;
 const WM_RERANK_COMPLETE: u32 = WM_USER + 2;
@@ -48,30 +50,67 @@ const TIMER_RERANK_DEBOUNCE_ID: usize = 102;
 const ID_TRAY_OPEN: usize = 1001;
 const ID_TRAY_SETTINGS: usize = 1002;
 const ID_TRAY_EXIT: usize = 1003;
-type RerankResults = Mutex<Option<(u64, Vec<ClipItem>)>>;
+type JevResults = Mutex<Option<(u64, Result<JevSearch, String>)>>;
+const JEV_MIN_QUERY_CHARS: usize = 2;
 
-fn apply_rerank_completion(
+/// Applies a finished search only if it belongs to the current query; returns whether it did.
+fn apply_jev_completion(
     ui: &mut crate::ui::UiState,
     seq: u64,
     current_seq: u64,
-    pending: &RerankResults,
-) {
+    pending: &JevResults,
+) -> bool {
     if seq == 0 || seq != current_seq {
-        return;
+        return false;
     }
-    ui.is_reranking = false;
-    let result = {
-        let mut lock = pending.lock().unwrap();
-        if lock.as_ref().is_some_and(|(stored_seq, _)| *stored_seq == seq) {
-            lock.take()
-        } else {
-            None
-        }
+    let Some((_, outcome)) = pending.lock().unwrap().take_if(|(stored, _)| *stored == seq) else {
+        return false;
     };
-    if let Some((_, clips)) = result {
-        ui.has_reranked = true;
-        ui.reranked_top_id = clips.first().map(|c| c.id.clone());
-        ui.set_clips(clips, Some(0));
+    match outcome {
+        Ok(search) => {
+            ui.jev_status = JevStatus::Ready;
+            ui.jev_result = Some(search);
+        }
+        Err(msg) => {
+            ui.jev_status = JevStatus::Failed(msg);
+            ui.jev_result = None;
+        }
+    }
+    true
+}
+
+/// What a query should do on its own, before any network call.
+fn jev_status_for(query: Option<&str>, enabled: bool, has_key: bool) -> JevStatus {
+    match query {
+        Some(q) if q.chars().count() >= JEV_MIN_QUERY_CHARS => {
+            if !enabled {
+                JevStatus::Failed("Jev search is turned off in settings".into())
+            } else if !has_key {
+                JevStatus::Failed("Add a TypeSafe API key to use > search".into())
+            } else {
+                JevStatus::Searching
+            }
+        }
+        _ => JevStatus::Idle,
+    }
+}
+
+/// The list for the current query: keyword search, history, or the last Jev result re-applied
+/// to the live database (so deletes, favorites, and new copies show up without a new request).
+fn visible_clips(db: &Database, ui: &crate::ui::UiState) -> Vec<ClipItem> {
+    let raw_query = ui.search_query.trim();
+    let history = || db.get_history(ui.settings.max_items, ui.show_favorites).unwrap_or_default();
+    match crate::typesafe::semantic_query(raw_query) {
+        None if raw_query.is_empty() => history(),
+        None => db.search_clips(raw_query, ui.show_favorites, ui.settings.max_items).unwrap_or_default(),
+        Some(_) => match (&ui.jev_result, &ui.jev_status) {
+            (Some(search), _) => search.arrange(
+                db.get_filtered_clips(&search.filter, ui.show_favorites).unwrap_or_default(),
+            ),
+            (None, JevStatus::Failed(_)) => Vec::new(),
+            // `>` alone, a too-short query, or the first search still loading.
+            (None, _) => history(),
+        },
     }
 }
 
@@ -91,9 +130,7 @@ pub struct AppState {
     pub last_image_hash: u128,
     pub ignore_blur_until: Instant,
     pub search_sequence_id: Arc<AtomicU64>,
-    pub pending_rerank_results: Arc<RerankResults>,
-    rerank_in_flight: bool,
-    rerank_requested: bool,
+    pub pending_jev_results: Arc<JevResults>,
     pending_surrogate: Option<u16>,
 }
 
@@ -118,9 +155,7 @@ impl AppState {
             last_image_hash: 0,
             ignore_blur_until: Instant::now(),
             search_sequence_id: Arc::new(AtomicU64::new(0)),
-            pending_rerank_results: Arc::new(Mutex::new(None)),
-            rerank_in_flight: false,
-            rerank_requested: false,
+            pending_jev_results: Arc::new(Mutex::new(None)),
             pending_surrogate: None,
         })
     }
@@ -141,12 +176,10 @@ impl AppState {
             self.ui.mode = UiMode::SingleCard;
             self.ui.search_query.clear();
             self.pending_surrogate = None;
-            self.rerank_requested = false;
-            *self.pending_rerank_results.lock().unwrap() = None;
+            *self.pending_jev_results.lock().unwrap() = None;
             let _ = KillTimer(self.hwnd, TIMER_BLINK_ID);
-            self.ui.is_reranking = false;
-            self.ui.has_reranked = false;
-            self.ui.reranked_top_id = None;
+            self.ui.jev_status = JevStatus::Idle;
+            self.ui.jev_result = None;
             let _ = KillTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID);
             self.search_sequence_id.fetch_add(1, Ordering::SeqCst);
             self.ui.set_clips(clips, Some(0));
@@ -365,31 +398,8 @@ impl AppState {
     pub fn refresh_ui_clips_with_selection(&mut self, select_idx: Option<usize>) {
         unsafe {
             if IsWindowVisible(self.hwnd).as_bool() {
-                let raw_query = self.ui.search_query.trim();
-                let is_search = !raw_query.is_empty();
-                let semantic_query = crate::typesafe::semantic_query(raw_query);
-
-                let clips = if let Some(query) = semantic_query.filter(|q| !q.is_empty()) {
-                    if let Some(format) = crate::typesafe::requested_format(query) {
-                        self.db.get_semantic_candidates(Some(format), self.ui.show_favorites)
-                            .unwrap_or_default()
-                    } else {
-                        // Wait for semantic results instead of flashing unrelated keyword matches.
-                        Vec::new()
-                    }
-                } else if !is_search || semantic_query.is_some() {
-                    self.db
-                        .get_history(self.ui.settings.max_items, self.ui.show_favorites)
-                        .unwrap_or_default()
-                } else {
-                    self.db
-                        .search_clips(
-                            raw_query,
-                            self.ui.show_favorites,
-                            self.ui.settings.max_items,
-                        )
-                        .unwrap_or_default()
-                };
+                let is_search = !self.ui.search_query.trim().is_empty();
+                let clips = visible_clips(&self.db, &self.ui);
                 let current_id = self.ui.selected_clip().map(|c| c.id.clone());
                 let effective_idx = select_idx
                     .or_else(|| {
@@ -404,96 +414,69 @@ impl AppState {
         }
     }
 
-    pub fn schedule_rerank_debounce(&mut self) {
+    /// Call after every edit to the search text.
+    pub fn query_changed(&mut self) {
+        self.schedule_jev_search();
+        self.refresh_ui_clips_with_selection(Some(0));
+    }
+
+    fn schedule_jev_search(&mut self) {
         // Invalidate in-flight work immediately, including during the debounce interval.
         self.search_sequence_id.fetch_add(1, Ordering::SeqCst);
-        self.rerank_requested = false;
-        *self.pending_rerank_results.lock().unwrap() = None;
+        *self.pending_jev_results.lock().unwrap() = None;
         unsafe {
             if self.ui.mode != UiMode::SearchList {
                 let _ = KillTimer(self.hwnd, TIMER_BLINK_ID);
             }
             let _ = KillTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID);
-            self.ui.is_reranking = false;
-            self.ui.has_reranked = false;
-            self.ui.reranked_top_id = None;
-
-            let raw_query = self.ui.search_query.trim();
-            let semantic_query = crate::typesafe::semantic_query(raw_query);
-            let clean_query = semantic_query.unwrap_or("");
-
-            if semantic_query.is_some()
-                && self.ui.mode == UiMode::SearchList
-                && clean_query.chars().count() >= 2
-                && self.ui.settings.enable_semantic_search
-                && self.ui.settings.get_typesafe_key().is_some()
-            {
+        }
+        let query = crate::typesafe::semantic_query(self.ui.search_query.trim())
+            .filter(|_| self.ui.mode == UiMode::SearchList);
+        let has_key = query.is_some() && self.ui.settings.get_typesafe_key().is_some();
+        self.ui.jev_status = jev_status_for(query, self.ui.settings.enable_semantic_search, has_key);
+        // Only an in-progress search keeps the previous result on screen.
+        if self.ui.jev_status != JevStatus::Searching {
+            self.ui.jev_result = None;
+        } else {
+            unsafe {
                 let _ = SetTimer(self.hwnd, TIMER_RERANK_DEBOUNCE_ID, 300, None);
             }
         }
     }
 
-    pub fn trigger_semantic_rerank(&mut self) {
-        if self.ui.mode != UiMode::SearchList {
+    fn start_jev_search(&mut self) {
+        if self.ui.mode != UiMode::SearchList || self.ui.jev_status != JevStatus::Searching {
             return;
         }
-        let raw_query = self.ui.search_query.trim();
-        let query = match crate::typesafe::semantic_query(raw_query) {
-            Some(query) => query.to_string(),
-            None => return,
+        let Some(query) = crate::typesafe::semantic_query(self.ui.search_query.trim()).map(str::to_string) else {
+            return;
         };
-        if query.chars().count() < 2 {
+        let Some(api_key) = self.ui.settings.get_typesafe_key() else {
             return;
-        }
-        if !self.ui.settings.enable_semantic_search {
-            return;
-        }
-        if self.rerank_in_flight {
-            self.rerank_requested = true;
-            return;
-        }
-        let api_key = match self.ui.settings.get_typesafe_key() {
-            Some(k) => k,
-            None => return,
         };
-
-        // Candidates are independent of FTS and include older requested formats.
-        let candidates = self
-            .db
-            .get_semantic_candidates(
-                crate::typesafe::requested_format(&query),
-                self.ui.show_favorites,
-            )
-            .unwrap_or_default();
-
-        if candidates.is_empty() {
-            return;
-        }
-
-        let seq = self.search_sequence_id.fetch_add(1, Ordering::SeqCst) + 1;
-        self.ui.is_reranking = true;
-        self.rerank_in_flight = true;
-        self.rerank_requested = false;
-        unsafe {
-            let _ = InvalidateRect(self.hwnd, None, false);
-        }
-
+        // The sequence was bumped when the query last changed; any later edit supersedes this run.
+        let seq = self.search_sequence_id.load(Ordering::SeqCst);
+        let db = self.db.clone();
         let seq_id_arc = self.search_sequence_id.clone();
-        let pending_arc = self.pending_rerank_results.clone();
+        let pending_arc = self.pending_jev_results.clone();
         let hwnd_raw = self.hwnd.0 as isize;
 
-        let spawned = std::thread::Builder::new().name("clipped-rerank".into()).spawn(move || {
-            match crate::typesafe::rerank_candidates(&api_key, &query, &candidates) {
-                Ok(reranked) => {
-                    {
-                        let mut lock = pending_arc.lock().unwrap();
-                        if seq_id_arc.load(Ordering::SeqCst) == seq {
-                            *lock = Some((seq, reranked));
-                        }
-                    }
-                }
-                Err(err) => {
-                    eprintln!("TypeSafe rerank error: {}", err);
+        // ponytail: superseded requests run to completion and are discarded; cancel the WinHTTP handle if concurrent requests pile up.
+        let spawned = std::thread::Builder::new().name("clipped-jev".into()).spawn(move || {
+            let apps = db.get_source_apps().unwrap_or_default();
+            let outcome = crate::typesafe::search(
+                &query,
+                &apps,
+                |body| crate::typesafe::post_system_one(&api_key, body),
+                |filter| db.get_filtered_clips(filter, false).unwrap_or_default(),
+            );
+            if let Err(err) = &outcome {
+                eprintln!("Jev search error: {err}");
+            }
+            {
+                let mut lock = pending_arc.lock().unwrap();
+                if seq_id_arc.load(Ordering::SeqCst) == seq {
+                    *lock = Some((seq, outcome));
                 }
             }
             unsafe {
@@ -504,9 +487,9 @@ impl AppState {
             }
         });
         if let Err(err) = spawned {
-            self.rerank_in_flight = false;
-            self.ui.is_reranking = false;
-            eprintln!("Could not start rerank: {err}");
+            self.ui.jev_status = JevStatus::Failed(format!("Could not start Jev search: {err}"));
+            self.ui.jev_result = None;
+            self.refresh_ui_clips_with_selection(Some(0));
         }
     }
 
@@ -583,15 +566,13 @@ unsafe fn hide_modal(state_ptr: *mut AppState) {
         let _ = KillTimer(hwnd, TIMER_BLINK_ID);
         let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
         state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
-        state.rerank_requested = false;
-        *state.pending_rerank_results.lock().unwrap() = None;
+        *state.pending_jev_results.lock().unwrap() = None;
         state.pending_surrogate = None;
         state.ui.set_clips(Vec::new(), Some(0));
         state.ui.mode = UiMode::SingleCard;
         state.ui.search_query.clear();
-        state.ui.is_reranking = false;
-        state.ui.has_reranked = false;
-        state.ui.reranked_top_id = None;
+        state.ui.jev_status = JevStatus::Idle;
+        state.ui.jev_result = None;
         state.ui.hover_target = HitTarget::None;
 
         // Evict cached Direct2D textures from VRAM/RAM
@@ -1030,7 +1011,7 @@ unsafe extern "system" fn wnd_proc(
             } else if wparam.0 == TIMER_RERANK_DEBOUNCE_ID {
                 let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
                 let state = &mut *state_ptr;
-                state.trigger_semantic_rerank();
+                state.start_jev_search();
             }
             LRESULT(0)
         }
@@ -1082,7 +1063,6 @@ unsafe extern "system" fn wnd_proc(
                     let state = &mut *state_ptr;
                     state.ui.show_favorites = !state.ui.show_favorites;
                     state.refresh_ui_clips_with_selection(Some(0));
-                    state.schedule_rerank_debounce();
                 }
                 HitTarget::SearchBox => {
                     let state = &mut *state_ptr;
@@ -1192,7 +1172,6 @@ unsafe extern "system" fn wnd_proc(
                     if state.ui.mode != UiMode::Settings {
                         state.ui.show_favorites = !state.ui.show_favorites;
                         state.refresh_ui_clips_with_selection(Some(0));
-                        state.schedule_rerank_debounce();
                         let _ = InvalidateRect(hwnd, None, false);
                     }
                 }
@@ -1204,18 +1183,13 @@ unsafe extern "system" fn wnd_proc(
                             let _ = InvalidateRect(hwnd, None, false);
                             false
                         } else if state.ui.mode == UiMode::SearchList {
-                            let _ = KillTimer(hwnd, TIMER_RERANK_DEBOUNCE_ID);
-                            state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
                             let had_query = !state.ui.search_query.is_empty();
                             state.ui.search_query.clear();
                             state.pending_surrogate = None;
-                            state.ui.is_reranking = false;
-                            state.ui.has_reranked = false;
-                            state.ui.reranked_top_id = None;
                             if !had_query {
                                 state.ui.mode = UiMode::SingleCard;
                             }
-                            state.refresh_ui_clips_with_selection(Some(0));
+                            state.query_changed();
                             false
                         } else {
                             true
@@ -1265,8 +1239,7 @@ unsafe extern "system" fn wnd_proc(
                         if state.ui.search_query.pop().is_none() {
                             state.ui.mode = UiMode::SingleCard;
                         }
-                        state.refresh_ui_clips_with_selection(Some(0));
-                        state.schedule_rerank_debounce();
+                        state.query_changed();
                     }
                 }
                 _ => {}
@@ -1297,23 +1270,20 @@ unsafe extern "system" fn wnd_proc(
                 }
                 state.ui.search_query.push(ch);
                 let _ = SetTimer(hwnd, TIMER_BLINK_ID, 500, None);
-                state.refresh_ui_clips_with_selection(Some(0));
-                state.schedule_rerank_debounce();
+                state.query_changed();
             }
             LRESULT(0)
         }
 
         WM_RERANK_COMPLETE => {
             let state = &mut *state_ptr;
-            state.rerank_in_flight = false;
-            apply_rerank_completion(
+            if apply_jev_completion(
                 &mut state.ui,
                 wparam.0 as u64,
                 state.search_sequence_id.load(Ordering::SeqCst),
-                &state.pending_rerank_results,
-            );
-            if state.rerank_requested {
-                state.trigger_semantic_rerank();
+                &state.pending_jev_results,
+            ) {
+                state.refresh_ui_clips_with_selection(Some(0));
             }
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
@@ -1325,7 +1295,7 @@ unsafe extern "system" fn wnd_proc(
             {
                 let state = &mut *state_ptr;
                 state.search_sequence_id.fetch_add(1, Ordering::SeqCst);
-                *state.pending_rerank_results.lock().unwrap() = None;
+                *state.pending_jev_results.lock().unwrap() = None;
             }
             PostQuitMessage(0);
             LRESULT(0)
@@ -1526,49 +1496,130 @@ mod icon_tests {
         assert_eq!(decode_input_unit(&mut pending, b'a' as u16), Some('a'));
     }
 
+    fn test_clip(id: &str, clip_type: &str, text: &str) -> ClipItem {
+        ClipItem {
+            id: id.into(),
+            text: text.into(),
+            clip_type: clip_type.into(),
+            full_text_len: text.len(),
+            ..ClipItem::default()
+        }
+    }
+
     #[test]
-    fn test_rerank_completion_replaces_list_and_ignores_stale_messages() {
+    fn test_jev_completion_applies_only_the_current_query() {
         let mut ui = crate::ui::UiState::new(PathBuf::new(), AppSettings::default());
         ui.mode = UiMode::SearchList;
-        let text = ClipItem {
-            id: "text".into(),
-            text: "A page about images".into(),
-            is_favorite: false,
-            clip_type: "text".into(),
-            image_path: None,
-            image_width: None,
-            image_height: None,
-            ocr_text: None,
-            full_text_len: 19,
-            created_at: 0,
-            source_app: None,
-        };
-        let image = ClipItem {
-            id: "image".into(),
-            clip_type: "image".into(),
-            ..text.clone()
-        };
-        ui.set_clips(vec![text], Some(0));
-        ui.is_reranking = true;
-        let pending = Mutex::new(Some((2, vec![image])));
-        apply_rerank_completion(&mut ui, 1, 2, &pending);
-        assert!(ui.is_reranking);
-        assert_eq!(ui.clips[0].id, "text");
-        assert!(pending.lock().unwrap().is_some());
+        ui.jev_status = JevStatus::Searching;
+        let newer = JevSearch { ranked_ids: Some(vec!["new".into()]), ..JevSearch::default() };
+        let pending: JevResults = Mutex::new(Some((2, Ok(newer.clone()))));
 
-        apply_rerank_completion(&mut ui, 2, 2, &pending);
-        assert!(!ui.is_reranking);
-        assert!(ui.has_reranked);
-        assert_eq!(ui.clips.len(), 1);
-        assert_eq!(ui.clips[0].id, "image");
-        assert_eq!(ui.reranked_top_id.as_deref(), Some("image"));
+        // A slow response for an older query arrives after the user kept typing.
+        assert!(!apply_jev_completion(&mut ui, 1, 2, &pending));
+        assert_eq!(ui.jev_status, JevStatus::Searching);
+        assert!(ui.jev_result.is_none());
+        assert!(pending.lock().unwrap().is_some(), "stale message must not consume the newer result");
 
-        *pending.lock().unwrap() = Some((3, Vec::new()));
-        apply_rerank_completion(&mut ui, 3, 3, &pending);
-        assert!(ui.clips.is_empty());
-        assert_eq!(ui.selected_index, 0);
-        assert_eq!(ui.scroll_offset, 0.0);
-        assert!(ui.reranked_top_id.is_none());
+        assert!(apply_jev_completion(&mut ui, 2, 2, &pending));
+        assert_eq!(ui.jev_status, JevStatus::Ready);
+        assert_eq!(ui.jev_result.as_ref(), Some(&newer));
+        assert!(pending.lock().unwrap().is_none());
+        // A duplicate completion message is a no-op.
+        assert!(!apply_jev_completion(&mut ui, 2, 2, &pending));
+
+        // A result stored for an older sequence is ignored even if the message says "current".
+        *pending.lock().unwrap() = Some((3, Ok(JevSearch::default())));
+        assert!(!apply_jev_completion(&mut ui, 4, 4, &pending));
+        assert_eq!(ui.jev_result.as_ref(), Some(&newer));
+
+        *pending.lock().unwrap() = Some((5, Err("Jev did not respond in time".into())));
+        assert!(apply_jev_completion(&mut ui, 5, 5, &pending));
+        assert_eq!(ui.jev_status, JevStatus::Failed("Jev did not respond in time".into()));
+        assert!(ui.jev_result.is_none());
+        assert_eq!(ui.empty_list_message(), "No matching clips found", "no `>` query, no Jev message");
+        ui.search_query = "> all chrome clips".into();
+        assert_eq!(ui.empty_list_message(), "Jev did not respond in time");
+    }
+
+    #[test]
+    fn test_jev_status_for_mode_transitions() {
+        use crate::typesafe::semantic_query;
+        let status = |raw: &str| jev_status_for(semantic_query(raw), true, true);
+        assert_eq!(status(""), JevStatus::Idle);
+        assert_eq!(status("images"), JevStatus::Idle, "plain searches never call Jev");
+        assert_eq!(status(">"), JevStatus::Idle);
+        assert_eq!(status("> a"), JevStatus::Idle);
+        assert_eq!(status("> Show me all the images"), JevStatus::Searching);
+        assert_eq!(status(">All Chrome clips"), JevStatus::Searching);
+        assert!(matches!(
+            jev_status_for(semantic_query("> images"), true, false),
+            JevStatus::Failed(msg) if msg.contains("API key")
+        ));
+        assert!(matches!(
+            jev_status_for(semantic_query("> images"), false, true),
+            JevStatus::Failed(msg) if msg.contains("turned off")
+        ));
+        // Missing key only matters once Jev would actually run.
+        assert_eq!(jev_status_for(semantic_query("images"), true, false), JevStatus::Idle);
+    }
+
+    #[test]
+    fn test_visible_clips_per_mode() {
+        use crate::typesafe::{AppFilter, ClipFilter};
+        let dir = std::env::temp_dir().join(format!("clipped_app_test_{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let db = Database::init(&dir).unwrap();
+        db.save_or_bump_text("chrome notes".into(), "h1", Some("chrome")).unwrap();
+        db.save_or_bump_text("images are great".into(), "h2", Some("code")).unwrap();
+        let mut image = test_clip("img", "image", "[Image]");
+        image.source_app = Some("chrome".into());
+        db.insert_image_clip(&image, "h3").unwrap();
+
+        let mut ui = crate::ui::UiState::new(PathBuf::new(), AppSettings::default());
+        ui.mode = UiMode::SearchList;
+        let ids = |ui: &crate::ui::UiState| {
+            let mut ids: Vec<_> = visible_clips(&db, ui).into_iter().map(|c| c.text).collect();
+            ids.sort();
+            ids
+        };
+
+        // Plain keyword search is untouched by Jev mode.
+        ui.search_query = "images".into();
+        assert_eq!(ids(&ui), ["images are great"]);
+
+        // `>` alone and the first in-flight search keep showing history, not a blank list.
+        ui.search_query = ">".into();
+        assert_eq!(ids(&ui).len(), 3);
+        ui.search_query = "> Show me all the images".into();
+        ui.jev_status = JevStatus::Searching;
+        assert_eq!(ids(&ui).len(), 3);
+
+        // A finished search is re-applied to the live database.
+        ui.jev_status = JevStatus::Ready;
+        ui.jev_result = Some(JevSearch {
+            filter: ClipFilter { format: Some("image"), ..ClipFilter::default() },
+            ranked_ids: None,
+        });
+        assert_eq!(ids(&ui), ["[Image]"]);
+        ui.search_query = "> All Chrome clips".into();
+        ui.jev_result = Some(JevSearch {
+            filter: ClipFilter { app: AppFilter::App("chrome".into()), ..ClipFilter::default() },
+            ranked_ids: None,
+        });
+        assert_eq!(ids(&ui), ["[Image]", "chrome notes"]);
+        // Toggling the favorites filter re-filters locally.
+        ui.show_favorites = true;
+        assert!(ids(&ui).is_empty());
+        ui.show_favorites = false;
+
+        // Failures show an empty list (with the error message), never unrelated history.
+        ui.jev_status = JevStatus::Failed("TypeSafe rejected the API key".into());
+        ui.jev_result = None;
+        assert!(ids(&ui).is_empty());
+        assert_eq!(ui.empty_list_message(), "TypeSafe rejected the API key");
+
+        drop(db);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

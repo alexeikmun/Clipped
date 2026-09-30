@@ -4,9 +4,9 @@ Instructions and guidelines for AI agents working in the Clipped repository.
 
 ## Project Overview
 
-Clipped is an ultra-lightweight, pure native desktop clipboard manager built with **Rust 2021** and **Raw Win32 + Direct2D / DirectWrite** (zero Chromium / zero WebView2 / zero Slint).
+Clipped is an ultra-lightweight, pure native desktop clipboard manager built with **Rust 2021** and **Raw Win32 + Direct2D / DirectWrite** (no browser engine, WebView, or UI framework).
 
-- **RAM Footprint**: **~0.33 MB Working Set / ~1.8 MB Private Memory** (reduced from 89 MB WebView2 and 10 MB Slint).
+- **RAM Footprint**: **~0.33 MB Working Set / ~1.8 MB Private Memory**.
 - **Executable Size**: ~1.5 MB standalone release binary.
 - **Global Hotkey**: `Ctrl+Alt+Shift+.` (configurable in settings).
 - **Behavior**: Opens centered floating modal, tracks clipboard history via native Win32 `AddClipboardFormatListener`, smart-truncates oldest non-favorites (max 999), allows instant FTS5 SQLite searching and direct pasting into active apps via simulated keystrokes.
